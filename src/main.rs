@@ -21,6 +21,7 @@ Commands:
   add <path> [-b <branch>] [<commit-ish>]   Create a new workspace
   list                                       List workspaces
   remove [--force] <path>                    Remove a workspace
+  run [--] <cmd> [args...]                    Run a command with git shim active
   setup [--path <dir>]                       Create a 'git' symlink to jj-worktree
 
 Options:
@@ -140,6 +141,83 @@ fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Err("setup command is only supported on Unix systems".into())
 }
 
+/// `jj-worktree run [--] <cmd> [args...]`
+///
+/// Creates a temporary git shim symlink in a cache directory, prepends it to PATH,
+/// and execs the given command. This is a Rust CLI tool using Unix execvp, not shell exec.
+#[cfg(unix)]
+fn cmd_run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::symlink;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    // Skip leading "--" separator if present
+    let args = if args.first().map(|a| a.as_str()) == Some("--") {
+        &args[1..]
+    } else {
+        args
+    };
+
+    if args.is_empty() {
+        return Err("run requires a command to execute".into());
+    }
+
+    let exe_path = current_exe_path()?;
+
+    // Determine cache dir: ${XDG_CACHE_HOME:-$HOME/.cache}/jj-worktree/bin
+    let cache_home = env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .ok_or("cannot determine cache directory: neither XDG_CACHE_HOME nor HOME is set")?;
+    let bin_dir = cache_home.join("jj-worktree").join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+
+    // Create/update git symlink
+    let symlink_path = bin_dir.join("git");
+    if symlink_path.symlink_metadata().is_ok() {
+        // Check if it already points to us
+        let needs_update = match std::fs::read_link(&symlink_path) {
+            Ok(target) => {
+                let canonical = if target.is_absolute() {
+                    target.canonicalize().unwrap_or(target)
+                } else {
+                    bin_dir
+                        .join(&target)
+                        .canonicalize()
+                        .unwrap_or(bin_dir.join(&target))
+                };
+                canonical != exe_path
+            }
+            Err(_) => true,
+        };
+        if needs_update {
+            std::fs::remove_file(&symlink_path)?;
+            symlink(&exe_path, &symlink_path)?;
+        }
+    } else {
+        symlink(&exe_path, &symlink_path)?;
+    }
+
+    // Prepend bin_dir to PATH
+    let mut new_path = std::ffi::OsString::from(&bin_dir);
+    if let Some(existing) = env::var_os("PATH") {
+        new_path.push(":");
+        new_path.push(existing);
+    }
+
+    // Replace the current process with the command (Unix execvp via CommandExt::exec)
+    let err = Command::new(&args[0])
+        .args(&args[1..])
+        .env("PATH", new_path)
+        .exec();
+    Err(format!("failed to exec '{}': {err}", args[0]).into())
+}
+
+#[cfg(not(unix))]
+fn cmd_run(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    Err("run command is only supported on Unix systems".into())
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mode = invocation_mode();
     let args: Vec<String> = env::args().skip(1).collect();
@@ -151,18 +229,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             // jj-worktree mode
-            if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
+            if args.is_empty() {
                 print_help();
-                return Ok(());
-            }
-            if args.iter().any(|a| a == "--version") {
-                print_version();
                 return Ok(());
             }
 
             match args[0].as_str() {
+                "--help" | "-h" => {
+                    print_help();
+                    return Ok(());
+                }
+                "--version" => {
+                    print_version();
+                    return Ok(());
+                }
                 "add" | "list" | "remove" => {
                     worktree::run(&args)?;
+                }
+                "run" => {
+                    cmd_run(&args[1..])?;
                 }
                 "setup" => {
                     cmd_setup(&args[1..])?;
