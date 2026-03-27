@@ -1,0 +1,17 @@
+[package]
+name = "jj-worktree"
+version = "0.1.0"
+edition = "2024"
+description = "A git shim that translates worktree operations to jj workspace commands"
+license = "MIT"
+repository = "https://github.com/kawaz/jj-worktree"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
