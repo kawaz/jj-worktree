@@ -30,7 +30,7 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, Box<dyn std::error::Error>
 
     while i < args.len() {
         match args[i].as_str() {
-            "-b" => {
+            "-b" | "-B" => {
                 i += 1;
                 if i >= args.len() {
                     return Err("-b requires a branch name".into());
