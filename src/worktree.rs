@@ -113,6 +113,9 @@ fn cmd_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     };
     meta::save(&repo_root, &ws_meta)?;
 
+    // Sync jj state to git refs
+    let _ = jj::run(Some(&repo_root), &["git", "export"]);
+
     eprintln!(
         "Created workspace '{}' at {}",
         ws_name,
@@ -344,6 +347,9 @@ fn cmd_remove(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Remove metadata
     meta::remove(&repo_root, &ws_name)?;
+
+    // Sync jj state to git refs
+    let _ = jj::run(Some(&repo_root), &["git", "export"]);
 
     eprintln!(
         "Removed workspace '{}' at {}",

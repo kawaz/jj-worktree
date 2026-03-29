@@ -215,6 +215,8 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     if !output.is_empty() {
                         println!("{output}");
                     }
+                    // Sync jj state to git refs
+                    let _ = jj::run(Some(root), &["git", "export"]);
                     return Ok(());
                 }
             }
