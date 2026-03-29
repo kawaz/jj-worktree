@@ -97,7 +97,11 @@ fn cmd_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. If <commit-ish> specified: jj -R <ws_abs_path> new <commit-ish>
     if let Some(ref commit_ish) = parsed.commit_ish {
-        jj::run_stdout(Some(&ws_abs_path), &["new", commit_ish])?;
+        let jj_rev = translate_git_ref(&repo_root, commit_ish);
+        if std::env::var("JJ_WORKTREE_DEBUG").as_deref() == Ok("1") && jj_rev != *commit_ish {
+            eprintln!("[jj-worktree debug] translated git ref: {commit_ish} -> {jj_rev}");
+        }
+        jj::run_stdout(Some(&ws_abs_path), &["new", &jj_rev])?;
     }
 
     // 4. Save metadata
@@ -406,6 +410,25 @@ fn resolve_path(cwd: &Path, path_str: &str) -> Result<PathBuf, Box<dyn std::erro
         Ok(canonical) => Ok(canonical),
         Err(_) => Ok(normalize_path(&abs)),
     }
+}
+
+/// Translate a git-style remote reference to jj-style.
+/// E.g., "origin/main" -> "main@origin", "origin/HEAD" -> "trunk()"
+/// Non-remote refs are returned as-is.
+fn translate_git_ref(repo_root: &Path, git_ref: &str) -> String {
+    if let Some((maybe_remote, branch)) = git_ref.split_once('/') {
+        // Query jj for known remotes
+        if let Ok(remotes) = jj::run_stdout(Some(repo_root), &["git", "remote", "list"]) {
+            let remote_names: Vec<&str> = remotes.lines().map(|l| l.trim()).collect();
+            if remote_names.contains(&maybe_remote) {
+                if branch == "HEAD" {
+                    return "trunk()".to_string();
+                }
+                return format!("{branch}@{maybe_remote}");
+            }
+        }
+    }
+    git_ref.to_string()
 }
 
 /// Normalize a path by resolving `.` and `..` components without requiring the path to exist.
