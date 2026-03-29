@@ -170,6 +170,11 @@ fn parse_branch_delete(args: &[String], subcmd_index: usize) -> Option<String> {
 
 /// Entry point for git shim mode. Called from main.rs when argv[0] is "git".
 pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Bypass shim entirely when JJ_WORKTREE_DISABLED=1
+    if env::var("JJ_WORKTREE_DISABLED").as_deref() == Ok("1") {
+        return exec_real_git(args);
+    }
+
     let parsed = parse_git_global_opts(args);
 
     // Determine the working directory for jj repo detection
