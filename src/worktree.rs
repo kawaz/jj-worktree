@@ -440,6 +440,10 @@ fn resolve_path(cwd: &Path, path_str: &str) -> Result<PathBuf, Box<dyn std::erro
 /// E.g., "origin/main" -> "main@origin", "origin/HEAD" -> "trunk()"
 /// Non-remote refs are returned as-is.
 fn translate_git_ref(repo_root: &Path, git_ref: &str) -> String {
+    // Bare "HEAD" → jj's "@" (current working copy)
+    if git_ref == "HEAD" {
+        return "@".to_string();
+    }
     if let Some((maybe_remote, branch)) = git_ref.split_once('/') {
         if branch == "HEAD" {
             return "trunk()".to_string();
