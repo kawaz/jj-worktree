@@ -18,9 +18,9 @@ Usage:
   jj-worktree <command> [options]
 
 Commands:
-  add <path> [-b <branch>] [<commit-ish>]   Create a new workspace
-  list                                       List workspaces
-  remove [--force] <path>                    Remove a workspace
+  add <path> [-b <branch>] [<commit-ish>]     Create a new workspace
+  list                                        List workspaces
+  remove [--force] <path>                     Remove a workspace
   run [--] <cmd> [args...]                    Run a command with git shim active
 
 Options:
