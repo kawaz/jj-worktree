@@ -166,6 +166,33 @@ fn parse_branch_delete(args: &[String], subcmd_index: usize) -> Option<String> {
     None
 }
 
+/// Parse `rev-parse` subcommand arguments to extract simple ref names.
+///
+/// Returns `Some(refs)` if the arguments consist only of ref names (optionally
+/// preceded by `--verify`).  Returns `None` when:
+/// - the argument list is empty (no refs to resolve)
+/// - any flag other than `--verify` is present (e.g. `--git-dir`, `--show-toplevel`,
+///   `--abbrev-ref`, `--short`, `--is-inside-work-tree`, etc.)
+///
+/// When `None` is returned the caller should fall through to real git.
+pub fn parse_rev_parse_refs(args: &[String]) -> Option<Vec<String>> {
+    let mut refs = Vec::new();
+
+    for arg in args {
+        if arg == "--verify" {
+            // --verify is acceptable; skip it
+            continue;
+        }
+        if arg.starts_with('-') {
+            // Any other flag → not a simple ref resolution; bail out
+            return None;
+        }
+        refs.push(arg.clone());
+    }
+
+    if refs.is_empty() { None } else { Some(refs) }
+}
+
 /// Entry point for git shim mode. Called from main.rs when argv[0] is "git".
 pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Bypass shim entirely when JJ_WORKTREE_DISABLED=1
@@ -221,6 +248,11 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             // Not a managed bookmark or not a delete: fall through to real git
             exec_real_git(args)
         }
+        ("rev-parse", Some(_root)) => {
+            jj::debug_message("intercepting git rev-parse in jj workspace");
+            let rev_parse_args: Vec<String> = args[subcmd_index + 1..].to_vec();
+            cmd_rev_parse(_root, &start_dir, &rev_parse_args, args)
+        }
         ("status", Some(root)) => {
             // Intercept `git status` in jj workspace to return jj-compatible results.
             // Claude Code uses `git status --porcelain` to check for changes before
@@ -233,6 +265,55 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             exec_real_git(args)
         }
     }
+}
+
+/// Handle `git rev-parse` by resolving simple ref names via jj.
+///
+/// When the arguments consist only of ref names (optionally with `--verify`),
+/// each ref is resolved through `jj log -r <ref> --no-graph -T commit_id`.
+/// Before resolution, `jj git export` is run to synchronize jj state to git refs.
+///
+/// If the arguments contain flags that indicate non-ref queries (e.g.
+/// `--git-dir`, `--show-toplevel`), the call is forwarded to real git.
+fn cmd_rev_parse(
+    _repo_root: &Path,
+    work_dir: &Path,
+    args: &[String],
+    all_args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let refs = match parse_rev_parse_refs(args) {
+        Some(refs) => refs,
+        None => return exec_real_git(all_args),
+    };
+
+    // Sync jj state to git refs so that commit IDs are resolvable
+    jj::debug_message("rev-parse: running jj git export before resolving refs");
+    let _ = jj::run(Some(work_dir), &["git", "export"]);
+
+    for ref_name in &refs {
+        let jj_ref = if ref_name == "HEAD" {
+            "@"
+        } else {
+            ref_name.as_str()
+        };
+        jj::debug_message(&format!(
+            "rev-parse: resolving {ref_name} as jj ref {jj_ref}"
+        ));
+        match jj::run_stdout(
+            Some(work_dir),
+            &["log", "-r", jj_ref, "--no-graph", "-T", "commit_id"],
+        ) {
+            Ok(hash) => println!("{hash}"),
+            Err(e) => {
+                jj::debug_message(&format!(
+                    "rev-parse: jj resolution failed for {ref_name}, falling back to real git: {e}"
+                ));
+                return exec_real_git(all_args);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Handle `git status` by translating to `jj diff --summary`.
@@ -577,5 +658,64 @@ mod tests {
         // where subcmd_index=2 (branch is at index 2)
         let args = s(&["-C", "/repo", "branch", "-d", "my-branch"]);
         assert_eq!(parse_branch_delete(&args, 2), Some("my-branch".to_string()));
+    }
+
+    // --- parse_rev_parse_refs tests ---
+
+    #[test]
+    fn rev_parse_head() {
+        let args = s(&["HEAD"]);
+        assert_eq!(parse_rev_parse_refs(&args), Some(vec!["HEAD".to_string()]));
+    }
+
+    #[test]
+    fn rev_parse_verify_head() {
+        let args = s(&["--verify", "HEAD"]);
+        assert_eq!(parse_rev_parse_refs(&args), Some(vec!["HEAD".to_string()]));
+    }
+
+    #[test]
+    fn rev_parse_git_dir_passthrough() {
+        let args = s(&["--git-dir"]);
+        assert_eq!(parse_rev_parse_refs(&args), None);
+    }
+
+    #[test]
+    fn rev_parse_show_toplevel_passthrough() {
+        let args = s(&["--show-toplevel"]);
+        assert_eq!(parse_rev_parse_refs(&args), None);
+    }
+
+    #[test]
+    fn rev_parse_abbrev_ref_passthrough() {
+        let args = s(&["--abbrev-ref", "HEAD"]);
+        assert_eq!(parse_rev_parse_refs(&args), None);
+    }
+
+    #[test]
+    fn rev_parse_short_passthrough() {
+        let args = s(&["--short", "HEAD"]);
+        assert_eq!(parse_rev_parse_refs(&args), None);
+    }
+
+    #[test]
+    fn rev_parse_multiple_refs() {
+        let args = s(&["HEAD", "main"]);
+        assert_eq!(
+            parse_rev_parse_refs(&args),
+            Some(vec!["HEAD".to_string(), "main".to_string()])
+        );
+    }
+
+    #[test]
+    fn rev_parse_empty() {
+        let args: Vec<String> = vec![];
+        assert_eq!(parse_rev_parse_refs(&args), None);
+    }
+
+    #[test]
+    fn rev_parse_is_inside_work_tree_passthrough() {
+        let args = s(&["--is-inside-work-tree"]);
+        assert_eq!(parse_rev_parse_refs(&args), None);
     }
 }
