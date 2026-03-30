@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::jj;
@@ -219,9 +219,66 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             // Not a managed bookmark or not a delete: fall through to real git
             exec_real_git(args)
         }
+        ("status", Some(root)) => {
+            // Intercept `git status` in jj workspace to return jj-compatible results.
+            // Claude Code uses `git status --porcelain` to check for changes before
+            // ExitWorktree; real git returns incorrect results in jj workspaces.
+            jj::debug_message("intercepting git status in jj workspace");
+            cmd_status(root, &start_dir, &args[subcmd_index + 1..])
+        }
         _ => {
             // Not in a jj repo, or unhandled subcommand: fall through to real git
             exec_real_git(args)
+        }
+    }
+}
+
+/// Handle `git status` by translating to `jj diff --summary`.
+///
+/// Converts jj diff output (e.g., "M file.txt") to git porcelain v1 format
+/// (e.g., " M file.txt").
+fn cmd_status(
+    _repo_root: &Path,
+    work_dir: &Path,
+    _args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output = jj::run_stdout(Some(work_dir), &["diff", "--summary"]);
+    match output {
+        Ok(diff) => {
+            if diff.is_empty() {
+                // No changes — output nothing (matches git status --porcelain with clean tree)
+                return Ok(());
+            }
+            // Convert jj diff --summary format to git porcelain v1.
+            // jj: "M file.txt", "A file.txt", "D file.txt", "R {from} {to}"
+            // git porcelain v1: " M file.txt", "A  file.txt", " D file.txt", "R  from -> to"
+            for line in diff.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Some((status, path)) = trimmed.split_once(' ') {
+                    match status {
+                        "M" => println!(" M {path}"),
+                        "A" => println!("?? {path}"),
+                        "D" => println!(" D {path}"),
+                        "R" => {
+                            // jj format: "R {from} {to}" — just report as modified
+                            println!(" M {path}");
+                        }
+                        _ => println!(" M {path}"),
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(_) => {
+            // If jj diff fails, fall back to real git
+            jj::debug_message("jj diff failed, falling back to real git for status");
+            let all_args: Vec<String> = std::iter::once("status".to_string())
+                .chain(_args.iter().cloned())
+                .collect();
+            exec_real_git(&all_args)
         }
     }
 }

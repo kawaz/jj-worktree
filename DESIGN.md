@@ -70,6 +70,12 @@ git branch -d <name>
   ├── 管理対象 → jj bookmark delete
   └── 非管理対象 → real git にフォールバック
 
+git status [--porcelain] [-C <path>]
+  ↓ shim.rs: subcmd=="status" + jj repo 内
+  ├── jj diff --summary を実行
+  ├── 出力を git porcelain v1 形式に変換 (M→" M", A→"??", D→" D")
+  └── jj diff 失敗時は real git にフォールバック
+
 git <other>
   ↓ shim.rs → exec_real_git() (Unix: process replace via exec)
 ```
