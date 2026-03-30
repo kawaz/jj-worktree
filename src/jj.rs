@@ -51,9 +51,9 @@ pub fn debug_message(msg: &str) {
 
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let pid = std::process::id();
-    // Escape msg for JSON (handle quotes and backslashes)
-    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    let line = format!(r#"{{"ts":"{ts}","pid":{pid},"msg":"{escaped}"}}"#);
+    // serde_json::to_string handles all JSON escaping (quotes, backslashes, control chars)
+    let msg_json = serde_json::to_string(msg).unwrap_or_else(|_| format!("\"{}\"", msg));
+    let line = format!(r#"{{"ts":"{ts}","pid":{pid},"msg":{msg_json}}}"#);
 
     if debug_stderr {
         eprintln!("{line}");

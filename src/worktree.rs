@@ -105,35 +105,50 @@ fn cmd_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     };
     let ws_abs_path = normalize_path(&ws_abs_path);
 
-    // 2. If -b <branch> specified: jj bookmark set <branch> -r <wsname>@
-    if let Some(ref branch) = parsed.branch {
-        jj::run_stdout(
-            Some(&repo_root),
-            &["bookmark", "set", branch, "-r", &format!("{ws_name}@")],
-        )?;
-    }
-
-    // 3. If <commit-ish> specified: jj -R <ws_abs_path> new <commit-ish>
-    if let Some(ref commit_ish) = parsed.commit_ish {
-        let jj_rev = translate_git_ref(&repo_root, commit_ish);
-        if jj_rev != *commit_ish {
-            jj::debug_message(&format!("translated git ref: {commit_ish} -> {jj_rev}"));
+    // Post-add setup: if anything fails, rollback the workspace
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        // 2. If -b <branch> specified: jj bookmark set <branch> -r <wsname>@
+        if let Some(ref branch) = parsed.branch {
+            jj::run_stdout(
+                Some(&repo_root),
+                &["bookmark", "set", branch, "-r", &format!("{ws_name}@")],
+            )?;
         }
-        jj::run_stdout(Some(&ws_abs_path), &["new", &jj_rev])?;
-    }
 
-    // 4. Save metadata
-    let ws_meta = meta::WorkspaceMeta {
-        workspace: ws_name.clone(),
-        bookmark: parsed.branch.clone(),
-        created_at: chrono::Utc::now(),
-        path: ws_abs_path.clone(),
-    };
-    meta::save(&repo_root, &ws_meta)?;
+        // 3. If <commit-ish> specified: jj -R <ws_abs_path> new <commit-ish>
+        if let Some(ref commit_ish) = parsed.commit_ish {
+            let jj_rev = translate_git_ref(&repo_root, commit_ish);
+            if jj_rev != *commit_ish {
+                jj::debug_message(&format!("translated git ref: {commit_ish} -> {jj_rev}"));
+            }
+            jj::run_stdout(Some(&ws_abs_path), &["new", &jj_rev])?;
+        }
 
-    // Sync jj state to git refs
-    if let Err(e) = jj::run(Some(&repo_root), &["git", "export"]) {
-        jj::debug_message(&format!("jj git export failed: {e}"));
+        // 4. Save metadata
+        let ws_meta = meta::WorkspaceMeta {
+            workspace: ws_name.clone(),
+            bookmark: parsed.branch.clone(),
+            created_at: chrono::Utc::now(),
+            path: ws_abs_path.clone(),
+        };
+        meta::save(&repo_root, &ws_meta)?;
+
+        // Sync jj state to git refs
+        if let Err(e) = jj::run(Some(&repo_root), &["git", "export"]) {
+            jj::debug_message(&format!("jj git export failed: {e}"));
+        }
+
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        // Cleanup: forget the workspace we just created
+        jj::debug_message(&format!("workspace setup failed, rolling back: {e}"));
+        let _ = jj::run(Some(&repo_root), &["workspace", "forget", &ws_name]);
+        if ws_abs_path.exists() {
+            let _ = std::fs::remove_dir_all(&ws_abs_path);
+        }
+        return Err(e);
     }
 
     eprintln!(
@@ -391,6 +406,10 @@ fn find_workspace_name(
     }
 
     // Fall back: try to match by the last component of the path
+    jj::debug_message(&format!(
+        "workspace path match failed, falling back to name match for '{}'",
+        target_path.display()
+    ));
     if let Some(dir_name) = target_path.file_name().and_then(|n| n.to_str()) {
         for ws_name in &ws_names {
             if ws_name == dir_name {
@@ -442,6 +461,9 @@ fn translate_git_ref(repo_root: &Path, git_ref: &str) -> String {
         {
             return jj_ref;
         }
+        jj::debug_message(&format!(
+            "git ref '{git_ref}' not resolved as jj ref '{jj_ref}', using as-is"
+        ));
     }
     git_ref.to_string()
 }

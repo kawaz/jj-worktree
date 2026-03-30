@@ -27,7 +27,9 @@ pub fn meta_dir(repo_root: &Path) -> PathBuf {
 
 /// Return the metadata file path for a given workspace name.
 pub fn meta_path(repo_root: &Path, ws_name: &str) -> PathBuf {
-    meta_dir(repo_root).join(format!("{}.json", ws_name))
+    // Sanitize: use only the file name component, reject path separators
+    let safe_name = ws_name.replace(['/', '\\'], "_");
+    meta_dir(repo_root).join(format!("{safe_name}.json"))
 }
 
 /// Save workspace metadata to disk.
