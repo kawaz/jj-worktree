@@ -50,32 +50,31 @@ fn invocation_mode() -> &'static str {
     if stem == "git" { "git" } else { "jj-worktree" }
 }
 
-/// Resolve the best symlink target for the git shim.
+/// Resolve the symlink target and determine whether the binary is installed in PATH.
 ///
-/// Prefers the PATH-resolved location (e.g. `/opt/homebrew/bin/jj-worktree`) over the
-/// canonicalized real path (e.g. `/opt/homebrew/Cellar/jj-worktree/0.2.0/bin/jj-worktree`).
-/// This ensures the symlink survives `brew upgrade` and similar package updates that
-/// change the version-specific directory while keeping the stable PATH entry.
-fn resolve_symlink_target() -> Result<PathBuf, Box<dyn std::error::Error>> {
+/// Returns `(target_path, in_path)`:
+/// - `in_path = true`: the binary was found in PATH (e.g. `/opt/homebrew/bin/jj-worktree`).
+///   The PATH entry is returned as the target, which may be a symlink — that's intentional,
+///   as it survives `brew upgrade` and similar package updates.
+/// - `in_path = false`: the binary was invoked via absolute/relative path or is a dev build.
+///   The canonicalized real path is returned as the target.
+fn resolve_symlink_target() -> Result<(PathBuf, bool), Box<dyn std::error::Error>> {
     let canonical = env::current_exe()?.canonicalize()?;
 
     // Search PATH for "jj-worktree" and pick the entry that resolves to the same binary.
     if let Some(path_var) = env::var_os("PATH") {
         for dir in env::split_paths(&path_var) {
             let candidate = dir.join("jj-worktree");
-            if candidate.is_file() {
-                if let Ok(resolved) = candidate.canonicalize() {
-                    if resolved == canonical {
-                        // Return the PATH entry as-is (may be a symlink — that's intentional).
-                        return Ok(candidate);
-                    }
-                }
+            if candidate.is_file()
+                && candidate.canonicalize().is_ok_and(|resolved| resolved == canonical)
+            {
+                return Ok((candidate, true));
             }
         }
     }
 
-    // Fallback: no stable PATH entry found; use the canonical real path.
-    Ok(canonical)
+    // Not found in PATH: use the canonical real path.
+    Ok((canonical, false))
 }
 
 /// `jj-worktree run [--] <cmd> [args...]`
@@ -99,14 +98,30 @@ fn cmd_run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("run requires a command to execute".into());
     }
 
-    let exe_path = resolve_symlink_target()?;
+    let (exe_path, in_path) = resolve_symlink_target()?;
 
-    // Determine cache dir: ${XDG_CACHE_HOME:-$HOME/.cache}/jj-worktree/bin
+    // Determine cache dir: ${XDG_CACHE_HOME:-$HOME/.cache}/jj-worktree/
     let cache_home = env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .ok_or("cannot determine cache directory: neither XDG_CACHE_HOME nor HOME is set")?;
-    let bin_dir = cache_home.join("jj-worktree").join("bin");
+    let jj_wt_cache = cache_home.join("jj-worktree");
+
+    // Choose shim directory:
+    // - Installed (in PATH): shared `${cache}/jj-worktree/bin/`
+    // - Dev/local build: `${TMPDIR}/jj-worktree/{hash}/` — keyed by canonical path hash
+    //   so the same build shares a shim across sessions without clobbering the production
+    //   shim. Uses TMPDIR so the OS cleans up stale entries on reboot.
+    let bin_dir = if in_path {
+        jj_wt_cache.join("bin")
+    } else {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        exe_path.hash(&mut hasher);
+        env::temp_dir()
+            .join("jj-worktree")
+            .join(format!("{:016x}", hasher.finish()))
+    };
     std::fs::create_dir_all(&bin_dir)?;
 
     // Create/update git symlink
