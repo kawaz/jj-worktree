@@ -109,7 +109,7 @@ fn cmd_run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // Choose shim directory:
     // - Installed (in PATH): shared `${cache}/jj-worktree/bin/`
-    // - Dev/local build: `${TMPDIR}/jj-worktree/{hash}/` — keyed by canonical path hash
+    // - Dev/local build: `${TMPDIR}/jj-worktree.{hash}/` — keyed by canonical path hash
     //   so the same build shares a shim across sessions without clobbering the production
     //   shim. Uses TMPDIR so the OS cleans up stale entries on reboot.
     let bin_dir = if in_path {
@@ -119,8 +119,7 @@ fn cmd_run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let mut hasher = std::hash::DefaultHasher::new();
         exe_path.hash(&mut hasher);
         env::temp_dir()
-            .join("jj-worktree")
-            .join(format!("{:016x}", hasher.finish()))
+            .join(format!("jj-worktree.{:016x}", hasher.finish()))
     };
     std::fs::create_dir_all(&bin_dir)?;
 
