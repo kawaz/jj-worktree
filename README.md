@@ -11,7 +11,7 @@ Tools like [Claude Code](https://docs.anthropic.com/en/docs/claude-code) use `gi
 A single binary acts as a `git` shim via the busybox pattern:
 
 ```
-argv[0] == "git"         -> shim mode: intercept worktree/branch/status subcommands
+argv[0] == "git"         -> shim mode: intercept worktree/branch/status/rev-parse subcommands
 argv[0] == "jj-worktree" -> direct mode: run workspace commands directly
 ```
 
@@ -26,6 +26,7 @@ A symlink `git -> jj-worktree` is placed at the front of `PATH`. Inside a jj rep
 | `git worktree remove <path>` | `jj workspace forget` + cleanup |
 | `git branch -d <name>` | `jj bookmark delete` (if managed) |
 | `git status [--porcelain]` | `jj diff --summary` |
+| `git rev-parse <ref>` | `jj log -r <ref> -T commit_id` (`HEAD` → `@`) |
 
 ## Install
 
@@ -47,7 +48,10 @@ cargo build --release
 jj-worktree run claude --worktree
 ```
 
-This creates a temporary symlink at `~/.cache/jj-worktree/bin/git`, prepends it to `PATH`, and `exec`s the command. The shim is active for all child processes. No permanent changes.
+This creates a symlink to the shim, prepends it to `PATH`, and `exec`s the command. The shim is active for all child processes.
+
+- **Installed version** (in PATH): symlink at `~/.cache/jj-worktree/bin/git` (shared, persistent)
+- **Dev build** (not in PATH): symlink at `$TMPDIR/jj-worktree.{hash}/git` (per-build, cleaned up on reboot)
 
 ### Direct commands
 

@@ -76,6 +76,14 @@ git status [--porcelain] [-C <path>]
   ├── 出力を git porcelain v1 形式に変換 (M→" M", A→"??", D→" D")
   └── jj diff 失敗時は real git にフォールバック
 
+git rev-parse [--verify] <ref>
+  ↓ shim.rs: subcmd=="rev-parse" + jj repo 内
+  ├── フラグ解析: --verify のみ許容、他フラグ → real git にフォールバック
+  ├── jj git export でリポジトリ状態を同期
+  ├── <ref> が "HEAD" の場合は "@" に変換
+  ├── jj log -r <ref> --no-graph -T commit_id で hash を取得
+  └── hash を出力（解決失敗時は real git にフォールバック）
+
 git <other>
   ↓ shim.rs → exec_real_git() (Unix: process replace via exec)
 ```
@@ -88,7 +96,7 @@ Claude Code は git 形式のリモート参照を渡す。jj では記法が異
 |---------|--------|------|
 | `origin/main` | `main@origin` | remote/branch → branch@remote |
 | `origin/HEAD` | `trunk()` | リモート HEAD は trunk() で代替 |
-| `HEAD` | `HEAD` | ローカル ref はそのまま |
+| `HEAD` | `@` | ワーキングコピーの現在リビジョン |
 | `abc1234` | `abc1234` | コミットハッシュはそのまま |
 
 変換時に `jj git remote list` で既知のリモート名を確認し、リモート名に一致する場合のみ変換。
@@ -144,7 +152,13 @@ bookmark 削除はメタデータに記録された名前のみを対象とし�
 jj-worktree run claude --worktree
 ```
 
-`${XDG_CACHE_HOME:-$HOME/.cache}/jj-worktree/bin/git` に symlink を作成し、PATH の先頭に追加してから `exec` でコマンドを起動。子プロセス全てで shim が有効になる。永続的な変更なし。
+shim への symlink を作成し、PATH の先頭に追加してから `exec` でコマンドを起動。子プロセス全てで shim が有効になる。
+
+symlink の配置先はバイナリの起動方法で分岐:
+- **インストール版** (PATH 上): `${XDG_CACHE_HOME:-$HOME/.cache}/jj-worktree/bin/git` — 複数セッションで共有
+- **開発版** (ローカルビルド等): `${TMPDIR}/jj-worktree.{hash}/git` — バイナリの canonical path をハッシュ化したキーで隔離。本番シムを上書きしない。OS 再起動時に自動クリーンアップ
+
+PATH 上に同一バイナリを指す `jj-worktree` エントリがあればインストール版と判定し、brew upgrade でバージョン付きパスが消えても安定パス（例: `/opt/homebrew/bin/jj-worktree`）を symlink 先に使うことで耐障害性を確保。
 
 ## 環境変数
 
@@ -203,13 +217,13 @@ brew install kawaz/tap/jj-worktree
 
 ## テスト
 
-61 テスト (39 unit + 22 integration)
+70 テスト (48 unit + 22 integration)
 
 ### ユニットテスト
 
 - `jj.rs`: find_repo_root, build_command (4)
 - `meta.rs`: save/load/remove/list/serialization (9)
-- `shim.rs`: parse_git_global_opts (18), parse_branch_delete (6)
+- `shim.rs`: parse_git_global_opts (18), parse_branch_delete (6), parse_rev_parse_refs (9)
 - `main.rs`: invocation_mode, help (2)
 
 ### 統合テスト (tests/integration.rs)
