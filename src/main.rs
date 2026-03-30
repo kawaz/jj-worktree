@@ -29,8 +29,9 @@ Options:
   --version    Show version
 
 Environment variables:
-  JJ_WORKTREE_DISABLED     Set to 1 to disable shim and pass through to real git
+  JJ_WORKTREE_DISABLED   Set to 1 to disable shim and pass through to real git
   JJ_WORKTREE_DEBUG      Set to 1 to log executed commands to stderr
+  JJ_WORKTREE_LOG_FILE   Path to append debug logs to a file
   JJ_WORKTREE_REAL_GIT   Override path to real git binary"
     );
 }

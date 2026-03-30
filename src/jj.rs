@@ -31,11 +31,40 @@ fn build_command(repo_root: Option<&Path>, args: &[&str]) -> Command {
     cmd
 }
 
-/// Log the command to stderr if JJ_WORKTREE_DEBUG=1.
-fn debug_log(cmd: &Command) {
-    if std::env::var("JJ_WORKTREE_DEBUG").as_deref() == Ok("1") {
-        eprintln!("[jj-worktree debug] {:?}", cmd);
+/// Write a debug message to stderr and/or log file.
+///
+/// - `JJ_WORKTREE_DEBUG=1`: output to stderr
+/// - `JJ_WORKTREE_LOG_FILE=<path>`: append to file
+/// - Both set: output to both
+pub fn debug_message(msg: &str) {
+    let debug_stderr = std::env::var("JJ_WORKTREE_DEBUG").as_deref() == Ok("1");
+    let log_file = std::env::var("JJ_WORKTREE_LOG_FILE").ok();
+
+    if !debug_stderr && log_file.is_none() {
+        return;
     }
+
+    let line = format!("[jj-worktree debug] {msg}");
+
+    if debug_stderr {
+        eprintln!("{line}");
+    }
+
+    if let Some(path) = log_file {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
+/// Log the command to debug output.
+fn debug_log(cmd: &Command) {
+    debug_message(&format!("{:?}", cmd));
 }
 
 /// Run a jj command and return the full Output.

@@ -122,13 +122,11 @@ fn find_real_git() -> Result<PathBuf, Box<dyn std::error::Error>> {
 fn exec_real_git(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let git = find_real_git()?;
 
-    if env::var("JJ_WORKTREE_DEBUG").as_deref() == Ok("1") {
-        eprintln!(
-            "[jj-worktree debug] exec real git: {} {}",
-            git.display(),
-            args.join(" ")
-        );
-    }
+    crate::jj::debug_message(&format!(
+        "exec real git: {} {}",
+        git.display(),
+        args.join(" ")
+    ));
 
     let mut cmd = Command::new(&git);
     cmd.args(args);
@@ -206,11 +204,9 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 // Check if this bookmark is managed by jj-worktree (search by bookmark name)
                 if let Ok(Some(_meta)) = meta::find_by_bookmark(root, &name) {
                     // Managed bookmark: convert to jj bookmark delete
-                    if env::var("JJ_WORKTREE_DEBUG").as_deref() == Ok("1") {
-                        eprintln!(
-                            "[jj-worktree debug] converting `git branch -d {name}` to `jj bookmark delete {name}`"
-                        );
-                    }
+                    jj::debug_message(&format!(
+                        "converting `git branch -d {name}` to `jj bookmark delete {name}`"
+                    ));
                     let output = jj::run_stdout(Some(root), &["bookmark", "delete", &name])?;
                     if !output.is_empty() {
                         println!("{output}");

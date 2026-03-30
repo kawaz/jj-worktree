@@ -98,8 +98,8 @@ fn cmd_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // 3. If <commit-ish> specified: jj -R <ws_abs_path> new <commit-ish>
     if let Some(ref commit_ish) = parsed.commit_ish {
         let jj_rev = translate_git_ref(&repo_root, commit_ish);
-        if std::env::var("JJ_WORKTREE_DEBUG").as_deref() == Ok("1") && jj_rev != *commit_ish {
-            eprintln!("[jj-worktree debug] translated git ref: {commit_ish} -> {jj_rev}");
+        if jj_rev != *commit_ish {
+            jj::debug_message(&format!("translated git ref: {commit_ish} -> {jj_rev}"));
         }
         jj::run_stdout(Some(&ws_abs_path), &["new", &jj_rev])?;
     }

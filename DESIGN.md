@@ -154,6 +154,7 @@ jj-worktree setup --path ~/.local/bin/
 |------|------|
 | `JJ_WORKTREE_DISABLED=1` | shim を無効化、全コマンドを real git にフォールバック |
 | `JJ_WORKTREE_DEBUG=1` | 実行コマンドを stderr にログ出力 |
+| `JJ_WORKTREE_LOG_FILE=<path>` | デバッグログをファイルに append 出力（DEBUG と併用可） |
 | `JJ_WORKTREE_REAL_GIT=/path` | real git バイナリパスを明示指定 |
 
 ## 安全機構
