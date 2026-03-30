@@ -2,6 +2,24 @@ use std::path::{Path, PathBuf};
 
 use crate::{jj, meta};
 
+const PROTECTED_WORKSPACES: &[&str] = &["default", "main"];
+
+/// Parse workspace names from `jj workspace list` output.
+/// Each line format: "<wsname>: <change-id> <description>"
+fn parse_workspace_names(ws_list_output: &str) -> Vec<String> {
+    ws_list_output
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            trimmed.split(':').next().map(|s| s.trim().to_string())
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
 /// Entry point called from main.rs. args[0] is the subcommand name.
 pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
@@ -114,7 +132,9 @@ fn cmd_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     meta::save(&repo_root, &ws_meta)?;
 
     // Sync jj state to git refs
-    let _ = jj::run(Some(&repo_root), &["git", "export"]);
+    if let Err(e) = jj::run(Some(&repo_root), &["git", "export"]) {
+        jj::debug_message(&format!("jj git export failed: {e}"));
+    }
 
     eprintln!(
         "Created workspace '{}' at {}",
@@ -139,18 +159,7 @@ fn cmd_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let ws_list_output = jj::run_stdout(Some(&repo_root), &["workspace", "list"])?;
 
     // Parse workspace names: each line starts with "<wsname>: ..."
-    let ws_names: Vec<String> = ws_list_output
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            // Format: "<wsname>: <change-id> <description>"
-            trimmed.split(':').next().map(|s| s.trim().to_string())
-        })
-        .filter(|name| !name.is_empty())
-        .collect();
+    let ws_names = parse_workspace_names(&ws_list_output);
 
     if ws_names.is_empty() {
         return Ok(());
@@ -284,11 +293,10 @@ fn cmd_remove(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let ws_name = find_workspace_name(&repo_root, &target_path)?;
 
     // 4. Protect main/default workspace
-    if ws_name == "default" || ws_name == "main" {
-        return Err(format!(
-            "refusing to remove the '{ws_name}' workspace (main/default workspace is protected)"
-        )
-        .into());
+    if PROTECTED_WORKSPACES.contains(&ws_name.as_str()) {
+        return Err(
+            format!("refusing to remove the '{ws_name}' workspace (protected workspace)").into(),
+        );
     }
 
     // 3. Load metadata for bookmark info
@@ -349,7 +357,9 @@ fn cmd_remove(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     meta::remove(&repo_root, &ws_name)?;
 
     // Sync jj state to git refs
-    let _ = jj::run(Some(&repo_root), &["git", "export"]);
+    if let Err(e) = jj::run(Some(&repo_root), &["git", "export"]) {
+        jj::debug_message(&format!("jj git export failed: {e}"));
+    }
 
     eprintln!(
         "Removed workspace '{}' at {}",
@@ -365,18 +375,7 @@ fn find_workspace_name(
     target_path: &Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let ws_list_output = jj::run_stdout(Some(repo_root), &["workspace", "list"])?;
-
-    let ws_names: Vec<String> = ws_list_output
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            trimmed.split(':').next().map(|s| s.trim().to_string())
-        })
-        .filter(|name| !name.is_empty())
-        .collect();
+    let ws_names = parse_workspace_names(&ws_list_output);
 
     // Try to match by path
     for ws_name in &ws_names {

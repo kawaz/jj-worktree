@@ -212,7 +212,9 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         println!("{output}");
                     }
                     // Sync jj state to git refs
-                    let _ = jj::run(Some(root), &["git", "export"]);
+                    if let Err(e) = jj::run(Some(root), &["git", "export"]) {
+                        jj::debug_message(&format!("jj git export failed: {e}"));
+                    }
                     return Ok(());
                 }
             }
@@ -272,9 +274,9 @@ fn cmd_status(
             }
             Ok(())
         }
-        Err(_) => {
+        Err(e) => {
             // If jj diff fails, fall back to real git
-            jj::debug_message("jj diff failed, falling back to real git for status");
+            jj::debug_message(&format!("jj diff failed, falling back to real git: {e}"));
             let all_args: Vec<String> = std::iter::once("status".to_string())
                 .chain(_args.iter().cloned())
                 .collect();

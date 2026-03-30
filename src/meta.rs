@@ -43,10 +43,11 @@ pub fn save(repo_root: &Path, meta: &WorkspaceMeta) -> io::Result<()> {
 /// Load workspace metadata from disk. Returns None if the file does not exist.
 pub fn load(repo_root: &Path, ws_name: &str) -> io::Result<Option<WorkspaceMeta>> {
     let path = meta_path(repo_root, ws_name);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = std::fs::read_to_string(&path)?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
     let meta: WorkspaceMeta = serde_json::from_str(&content).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
