@@ -3,8 +3,8 @@
 ## 背景
 
 Claude Code は `git worktree` による並列セッション隔離機能を持つが、jj リポジトリでは:
-- `.git` (bare) があるため git リポジトリと判定される
-- しかし `git worktree add` は detached HEAD / bare 環境で失敗 (Issue #27466)
+- `.git` があるため git リポジトリと判定され、git 経由の操作が試みられる
+- しかし `git status` や ref 解決など git の各種操作が jj 環境では正しく動作せず、worktree フロー全体が破綻する
 - WorktreeCreate/WorktreeRemove hooks は git リポジトリ内で無視される (Issue #36205)
 
 ## 解決策

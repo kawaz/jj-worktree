@@ -4,7 +4,7 @@ A git shim that translates `git worktree` operations to `jj workspace` commands.
 
 ## Why
 
-Tools like [Claude Code](https://docs.anthropic.com/en/docs/claude-code) use `git worktree` for parallel session isolation. In jj repositories, `git worktree add` fails because the `.git` is bare. jj-worktree bridges this gap by intercepting `git worktree` calls and converting them to equivalent `jj workspace` operations.
+Tools like [Claude Code](https://docs.anthropic.com/en/docs/claude-code) use `git worktree` for parallel session isolation. In jj repositories, git operations like `git status` and ref resolution don't work correctly, causing the worktree workflow to fail. jj-worktree bridges this gap by intercepting `git worktree` calls and converting them to equivalent `jj workspace` operations.
 
 ## How it works
 
