@@ -66,7 +66,9 @@ fn resolve_symlink_target() -> Result<(PathBuf, bool), Box<dyn std::error::Error
         for dir in env::split_paths(&path_var) {
             let candidate = dir.join("jj-worktree");
             if candidate.is_file()
-                && candidate.canonicalize().is_ok_and(|resolved| resolved == canonical)
+                && candidate
+                    .canonicalize()
+                    .is_ok_and(|resolved| resolved == canonical)
             {
                 return Ok((candidate, true));
             }
@@ -118,8 +120,7 @@ fn cmd_run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::hash::DefaultHasher::new();
         exe_path.hash(&mut hasher);
-        env::temp_dir()
-            .join(format!("jj-worktree.{:016x}", hasher.finish()))
+        env::temp_dir().join(format!("jj-worktree.{:016x}", hasher.finish()))
     };
     std::fs::create_dir_all(&bin_dir)?;
 
