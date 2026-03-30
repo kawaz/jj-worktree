@@ -425,7 +425,10 @@ fn translate_git_ref(repo_root: &Path, git_ref: &str) -> String {
     if let Some((maybe_remote, branch)) = git_ref.split_once('/') {
         // Query jj for known remotes
         if let Ok(remotes) = jj::run_stdout(Some(repo_root), &["git", "remote", "list"]) {
-            let remote_names: Vec<&str> = remotes.lines().map(|l| l.trim()).collect();
+            let remote_names: Vec<&str> = remotes
+                .lines()
+                .filter_map(|l| l.split_whitespace().next())
+                .collect();
             if remote_names.contains(&maybe_remote) {
                 if branch == "HEAD" {
                     return "trunk()".to_string();
