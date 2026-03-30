@@ -153,9 +153,14 @@ jj-worktree setup --path ~/.local/bin/
 | 変数 | 用途 |
 |------|------|
 | `JJ_WORKTREE_DISABLED=1` | shim を無効化、全コマンドを real git にフォールバック |
-| `JJ_WORKTREE_DEBUG=1` | 実行コマンドを stderr にログ出力 |
-| `JJ_WORKTREE_LOG_FILE=<path>` | デバッグログをファイルに append 出力（DEBUG と併用可） |
+| `JJ_WORKTREE_DEBUG=1` | デバッグログを stderr に JSONL 出力 |
+| `JJ_WORKTREE_LOG_FILE=<path>` | デバッグログをファイルに JSONL append 出力（DEBUG と併用可） |
 | `JJ_WORKTREE_REAL_GIT=/path` | real git バイナリパスを明示指定 |
+
+ログ形式 (JSONL):
+```json
+{"ts":"2026-03-30T09:00:00.123Z","pid":1234,"msg":"exec real git: /usr/bin/git --version"}
+```
 
 ## 安全機構
 

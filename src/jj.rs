@@ -31,11 +31,16 @@ fn build_command(repo_root: Option<&Path>, args: &[&str]) -> Command {
     cmd
 }
 
-/// Write a debug message to stderr and/or log file.
+/// Write a debug message as JSONL to stderr and/or log file.
 ///
 /// - `JJ_WORKTREE_DEBUG=1`: output to stderr
 /// - `JJ_WORKTREE_LOG_FILE=<path>`: append to file
 /// - Both set: output to both
+///
+/// Output format (JSONL):
+/// ```json
+/// {"ts":"2026-03-30T09:00:00.123Z","pid":1234,"msg":"..."}
+/// ```
 pub fn debug_message(msg: &str) {
     let debug_stderr = std::env::var("JJ_WORKTREE_DEBUG").as_deref() == Ok("1");
     let log_file = std::env::var("JJ_WORKTREE_LOG_FILE").ok();
@@ -44,7 +49,11 @@ pub fn debug_message(msg: &str) {
         return;
     }
 
-    let line = format!("[jj-worktree debug] {msg}");
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let pid = std::process::id();
+    // Escape msg for JSON (handle quotes and backslashes)
+    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
+    let line = format!(r#"{{"ts":"{ts}","pid":{pid},"msg":"{escaped}"}}"#);
 
     if debug_stderr {
         eprintln!("{line}");
