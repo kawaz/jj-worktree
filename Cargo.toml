@@ -1,6 +1,6 @@
 [package]
 name = "jj-worktree"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 description = "A git shim that translates worktree operations to jj workspace commands"
 license = "MIT"
