@@ -50,10 +50,31 @@ fn invocation_mode() -> &'static str {
     if stem == "git" { "git" } else { "jj-worktree" }
 }
 
-/// Get the absolute path of the currently running binary.
-fn current_exe_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let exe = env::current_exe()?;
-    let canonical = exe.canonicalize()?;
+/// Resolve the best symlink target for the git shim.
+///
+/// Prefers the PATH-resolved location (e.g. `/opt/homebrew/bin/jj-worktree`) over the
+/// canonicalized real path (e.g. `/opt/homebrew/Cellar/jj-worktree/0.2.0/bin/jj-worktree`).
+/// This ensures the symlink survives `brew upgrade` and similar package updates that
+/// change the version-specific directory while keeping the stable PATH entry.
+fn resolve_symlink_target() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let canonical = env::current_exe()?.canonicalize()?;
+
+    // Search PATH for "jj-worktree" and pick the entry that resolves to the same binary.
+    if let Some(path_var) = env::var_os("PATH") {
+        for dir in env::split_paths(&path_var) {
+            let candidate = dir.join("jj-worktree");
+            if candidate.is_file() {
+                if let Ok(resolved) = candidate.canonicalize() {
+                    if resolved == canonical {
+                        // Return the PATH entry as-is (may be a symlink — that's intentional).
+                        return Ok(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: no stable PATH entry found; use the canonical real path.
     Ok(canonical)
 }
 
@@ -78,7 +99,7 @@ fn cmd_run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("run requires a command to execute".into());
     }
 
-    let exe_path = current_exe_path()?;
+    let exe_path = resolve_symlink_target()?;
 
     // Determine cache dir: ${XDG_CACHE_HOME:-$HOME/.cache}/jj-worktree/bin
     let cache_home = env::var_os("XDG_CACHE_HOME")
