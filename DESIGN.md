@@ -28,7 +28,7 @@ symlink で `git → jj-worktree` を作成し、PATH の先頭に置くこと�
 
 ```
 src/
-├── main.rs       # エントリポイント、argv[0] 判定、setup/run コマンド
+├── main.rs       # エントリポイント、argv[0] 判定、run コマンド
 ├── shim.rs       # git shim: グローバルオプション解析、real git 検出、コマンド振り分け
 ├── worktree.rs   # add/list/remove: jj workspace 操作の実装
 ├── jj.rs         # jj コマンド実行ヘルパー、リポジトリ検出
@@ -138,21 +138,13 @@ bookmark 削除はメタデータに記録された名前のみを対象とし�
 
 ## セットアップ方法
 
-### `jj-worktree run` (推奨、一時的)
+### `jj-worktree run`
 
 ```bash
 jj-worktree run claude --worktree
 ```
 
 `${XDG_CACHE_HOME:-$HOME/.cache}/jj-worktree/bin/git` に symlink を作成し、PATH の先頭に追加してから `exec` でコマンドを起動。子プロセス全てで shim が有効になる。永続的な変更なし。
-
-### `jj-worktree setup` (永続的)
-
-```bash
-jj-worktree setup --path ~/.local/bin/
-```
-
-指定ディレクトリに `git` symlink を作成。既に存在する場合は自分自身を指す symlink かチェック。
 
 ## 環境変数
 

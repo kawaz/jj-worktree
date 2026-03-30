@@ -22,7 +22,6 @@ Commands:
   list                                       List workspaces
   remove [--force] <path>                    Remove a workspace
   run [--] <cmd> [args...]                    Run a command with git shim active
-  setup [--path <dir>]                       Create a 'git' symlink to jj-worktree
 
 Options:
   --help       Show this help message
@@ -56,91 +55,6 @@ fn current_exe_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let exe = env::current_exe()?;
     let canonical = exe.canonicalize()?;
     Ok(canonical)
-}
-
-/// `jj-worktree setup [--path <dir>]`
-///
-/// Creates a `git` symlink in the target directory pointing to the jj-worktree binary.
-#[cfg(unix)]
-fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::fs::symlink;
-
-    // Parse --path <dir> option
-    let mut target_dir: Option<PathBuf> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--path" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err("--path requires an argument".into());
-                }
-                target_dir = Some(PathBuf::from(&args[i]));
-            }
-            other => {
-                return Err(format!("unknown option for setup: {other}").into());
-            }
-        }
-        i += 1;
-    }
-
-    let dir = match target_dir {
-        Some(d) => d
-            .canonicalize()
-            .map_err(|e| format!("cannot resolve path: {e}"))?,
-        None => env::current_dir()?,
-    };
-
-    let symlink_path = dir.join("git");
-    let exe_path = current_exe_path()?;
-
-    // Check if `git` already exists
-    if symlink_path.exists() || symlink_path.symlink_metadata().is_ok() {
-        // Something exists at the path — check if it's a symlink to ourselves
-        match std::fs::read_link(&symlink_path) {
-            Ok(link_target) => {
-                // Canonicalize the link target to compare absolute paths
-                let canonical_target = if link_target.is_absolute() {
-                    link_target.canonicalize().unwrap_or(link_target)
-                } else {
-                    dir.join(&link_target)
-                        .canonicalize()
-                        .unwrap_or(dir.join(&link_target))
-                };
-                if canonical_target == exe_path {
-                    eprintln!("already set up: {}", symlink_path.display());
-                    return Ok(());
-                } else {
-                    return Err(format!(
-                        "git already exists and is not a jj-worktree symlink: {}",
-                        symlink_path.display()
-                    )
-                    .into());
-                }
-            }
-            Err(_) => {
-                // Not a symlink (regular file or directory)
-                return Err(format!(
-                    "git already exists and is not a jj-worktree symlink: {}",
-                    symlink_path.display()
-                )
-                .into());
-            }
-        }
-    }
-
-    symlink(&exe_path, &symlink_path)?;
-    eprintln!(
-        "created symlink: {} -> {}",
-        symlink_path.display(),
-        exe_path.display()
-    );
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    Err("setup command is only supported on Unix systems".into())
 }
 
 /// `jj-worktree run [--] <cmd> [args...]`
@@ -250,9 +164,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 "run" => {
                     cmd_run(&args[1..])?;
-                }
-                "setup" => {
-                    cmd_setup(&args[1..])?;
                 }
                 other => {
                     eprintln!("unknown command: {other}");
