@@ -21,19 +21,22 @@ check:
 fmt:
     cargo fmt
 
+# ワーキングコピーがクリーン（empty）であることを確認
+ensure-clean:
+    test "$(jj log -r @ --no-graph -T 'empty')" = "true"
+
+# push (check + test を通してから push)
+push: check test
+    jj git push
+
 # ビルドして実行
 run *ARGS: build
     ./target/release/jj-worktree {{ARGS}}
 
 # リリース (bump: major, minor, patch)
-release bump="patch":
+release bump="patch": ensure-clean check test build
     #!/usr/bin/env bash
     set -euo pipefail
-
-    # Pre-checks
-    cargo fmt --check || { echo "Error: Run 'cargo fmt' first." >&2; exit 1; }
-    cargo clippy -- -D warnings
-    cargo test
 
     # Version bump
     current=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
@@ -49,14 +52,20 @@ release bump="patch":
     cargo check --quiet
     echo "Version: ${current} -> ${new_version}"
 
-    # Commit, tag, push
+    # CHANGELOG.md update via Claude (auto-generate from commit log)
+    latest_tag=$(gh release list --repo kawaz/jj-worktree --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+    if [ -n "$latest_tag" ]; then
+        changes=$(jj log -r "$latest_tag..@-" --no-graph -T 'description ++ "\n"' 2>/dev/null || echo "")
+    else
+        changes=$(jj log -r '..@-' --no-graph -T 'description ++ "\n"' 2>/dev/null || echo "")
+    fi
+    claude -p "CHANGELOG.mdに v${new_version} ($(date +%Y-%m-%d)) のセクションを追加してください。以下のコミットログを元に、利用者視点で重要な順に記載: 新機能 / 動作変更(破壊的変更は特に明記) / バグ修正 / その他。内部リファクタやCI変更など利用者に影響しないものは省略可。コミットログ: ${changes}"
+
+    # Commit and push (GitHub Actions creates tag + release automatically)
     jj describe -m "Release v${new_version}"
     jj new
     jj bookmark set main -r @-
-    jj tag set "v${new_version}" -r @-
-    jj git push --bookmark main
-    jj git export
-    GIT_WORK_TREE="$(pwd)" git --git-dir="$(jj root)/../.git" push origin "v${new_version}"
+    just push
 
-    # Watch workflow
+    # Watch release workflow
     gh run watch
