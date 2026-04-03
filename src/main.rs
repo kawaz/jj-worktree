@@ -31,7 +31,8 @@ Environment variables:
   JJ_WORKTREE_DISABLED   Set to 1 to disable shim and pass through to real git
   JJ_WORKTREE_DEBUG      Set to 1 to log to stderr (JSONL format)
   JJ_WORKTREE_LOG_FILE   Append debug logs to a file (JSONL format)
-  JJ_WORKTREE_REAL_GIT   Override path to real git binary"
+  JJ_WORKTREE_REAL_GIT   Override path to real git binary
+  JJ_WORKTREE_DETECT     Set to 1 to probe: prints 'jj-worktree' and exits"
     );
 }
 
@@ -215,6 +216,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() {
+    // Respond to detection probe (used by find_real_git to skip jj-worktree binaries in PATH)
+    if env::var_os("JJ_WORKTREE_DETECT").is_some() {
+        println!("jj-worktree");
+        process::exit(0);
+    }
+
     if let Err(e) = run() {
         eprintln!("error: {e}");
         process::exit(1);

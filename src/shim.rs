@@ -81,10 +81,26 @@ pub fn parse_git_global_opts(args: &[String]) -> ParsedGitArgs {
     }
 }
 
-/// Find the real git binary, skipping our own binary.
+/// Check if a binary at the given path is a jj-worktree instance.
+///
+/// Runs the binary with `JJ_WORKTREE_DETECT=1` and checks if it responds
+/// with "jj-worktree". This works regardless of how the binary is installed
+/// (symlink, hard link, copy, rename).
+fn is_jj_worktree_binary(path: &Path) -> bool {
+    use std::process::Stdio;
+    Command::new(path)
+        .env("JJ_WORKTREE_DETECT", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| o.stdout.starts_with(b"jj-worktree"))
+        .unwrap_or(false)
+}
+
+/// Find the real git binary, skipping all jj-worktree instances.
 ///
 /// 1. If `JJ_WORKTREE_REAL_GIT` is set, use that.
-/// 2. Otherwise, search PATH for a `git` that is not our own binary.
+/// 2. Otherwise, search PATH for a `git` that is not a jj-worktree binary.
 fn find_real_git() -> Result<PathBuf, Box<dyn std::error::Error>> {
     // Check environment variable override
     if let Ok(path) = env::var("JJ_WORKTREE_REAL_GIT") {
@@ -95,7 +111,7 @@ fn find_real_git() -> Result<PathBuf, Box<dyn std::error::Error>> {
         return Err(format!("JJ_WORKTREE_REAL_GIT points to non-existent path: {path}").into());
     }
 
-    // Get our own canonical path to exclude from search
+    // Get our own canonical path for fast-path exclusion (avoids spawning a process)
     let self_path = env::current_exe().ok().and_then(|p| p.canonicalize().ok());
 
     // Search PATH
@@ -103,20 +119,14 @@ fn find_real_git() -> Result<PathBuf, Box<dyn std::error::Error>> {
         for dir in env::split_paths(&path_var) {
             let candidate = dir.join("git");
             if candidate.is_file() {
-                // Skip any jj-worktree binary in PATH (symlink, copy, or our own exe)
-                let is_jj_worktree = candidate.canonicalize().ok().is_some_and(|canonical| {
-                    // Exact match with our own binary
-                    if let Some(ref self_p) = self_path
-                        && &canonical == self_p
-                    {
-                        return true;
-                    }
-                    // Canonical name is jj-worktree (e.g., symlink git -> jj-worktree)
-                    canonical
-                        .file_name()
-                        .is_some_and(|name| name == "jj-worktree")
-                });
-                if is_jj_worktree {
+                // Fast path: skip if canonical path matches our own binary
+                if let Some(ref self_p) = self_path
+                    && candidate.canonicalize().ok().as_ref() == Some(self_p)
+                {
+                    continue;
+                }
+                // Definitive check: probe the binary with JJ_WORKTREE_DETECT
+                if is_jj_worktree_binary(&candidate) {
                     continue;
                 }
                 return Ok(candidate);
