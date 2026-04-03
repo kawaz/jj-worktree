@@ -68,4 +68,6 @@ release bump="patch": ensure-clean check test build
     just push
 
     # Watch release workflow
-    gh run watch
+    sleep 3
+    run_id=$(gh run list --repo kawaz/jj-worktree --limit 1 --json databaseId -q '.[0].databaseId')
+    gh run watch "$run_id" --repo kawaz/jj-worktree
