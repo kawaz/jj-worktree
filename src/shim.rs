@@ -103,11 +103,20 @@ fn find_real_git() -> Result<PathBuf, Box<dyn std::error::Error>> {
         for dir in env::split_paths(&path_var) {
             let candidate = dir.join("git");
             if candidate.is_file() {
-                // Skip if it's our own binary
-                if let Some(ref self_p) = self_path
-                    && let Ok(canonical) = candidate.canonicalize()
-                    && &canonical == self_p
-                {
+                // Skip any jj-worktree binary in PATH (symlink, copy, or our own exe)
+                let is_jj_worktree = candidate.canonicalize().ok().is_some_and(|canonical| {
+                    // Exact match with our own binary
+                    if let Some(ref self_p) = self_path {
+                        if &canonical == self_p {
+                            return true;
+                        }
+                    }
+                    // Canonical name is jj-worktree (e.g., symlink git -> jj-worktree)
+                    canonical
+                        .file_name()
+                        .is_some_and(|name| name == "jj-worktree")
+                });
+                if is_jj_worktree {
                     continue;
                 }
                 return Ok(candidate);
