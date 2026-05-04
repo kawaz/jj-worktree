@@ -55,6 +55,22 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, Box<dyn std::error::Error>
                 }
                 branch = Some(args[i].clone());
             }
+            // git worktree add flags with no jj-workspace equivalent —
+            // silently ignore. jj workspaces are always linked to the parent
+            // repo's state; tracking, checkout, lock and orphan semantics
+            // don't apply. Without this, callers like Claude Code that pass
+            // `--no-track` (or other standard git flags) get rejected.
+            "--no-track" | "--track" | "--no-checkout" | "--checkout"
+            | "--detach" | "--orphan" | "--lock"
+            | "--quiet" | "-q" | "--force" | "-f"
+            | "--guess-remote" | "--no-guess-remote" => {}
+            // Flags that consume the next argument; ignore both.
+            "--lock-reason" | "--reason" => {
+                if i + 1 >= args.len() {
+                    return Err(format!("{} requires a value", args[i]).into());
+                }
+                i += 1;
+            }
             arg if arg.starts_with('-') => {
                 return Err(format!("unknown option: {arg}").into());
             }
@@ -270,7 +286,9 @@ fn cmd_remove(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     for arg in args {
         match arg.as_str() {
-            "--force" => force = true,
+            "--force" | "-f" => force = true,
+            // git-specific flags with no jj-workspace equivalent — ignore.
+            "--quiet" | "-q" => {}
             a if a.starts_with('-') => {
                 return Err(format!("unknown option: {a}").into());
             }
