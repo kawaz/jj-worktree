@@ -5,5 +5,5 @@
 | DR | タイトル | ステータス |
 |---|---|---|
 | [DR-0001](./DR-0001-lenient-unknown-options.md) | 未知の `git worktree` オプションは寛容に pass-through する | Accepted |
-| [DR-0002](./DR-0002-self-reporting-mechanism.md) | 想定外オプション/エラー時の自己報告メカニズム | Accepted |
+| [DR-0002](./DR-0002-self-reporting-mechanism.md) | 想定外オプション/エラー時の自己報告メカニズム (DR-0001 を補完) | Accepted |
 | [DR-0003](./DR-0003-release-flow.md) | リリースフロー (Cargo.toml 変化検知 → tag 自動生成 + GitHub Release) | Accepted |

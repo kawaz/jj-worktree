@@ -75,10 +75,8 @@ bump-version bump="patch": ensure-clean test build
 削除するもの:
 - Claude による `CHANGELOG.md` 自動生成 (`--generate-notes` に一任)
 - `jj bookmark set main -r @-` (`just push` の中で実行されるので二重に書かない)
-- `cargo check --quiet` 後の `echo "Version: ${current} -> ${new_version}"` は echo として残す（人間向けの確認情報）
 
-依存階層 (DR-0001/DR-0002 の lint→ensure-clean パターンと整合):
-- `bump-version: ensure-clean test build` で lint は3経路すべてから依存され、重複排除で1回
+依存階層: `bump-version: ensure-clean test build`。just の依存重複排除で `lint` は3経路から1回だけ実行される。`ensure-clean: lint` の依存トリック自体は別 finding (`2026-05-09-justfile-template-research.md`) で整理した justfile 設計の一部であり、本 DR の意思決定の対象ではない (リリースフローと依存トポロジーは独立レイヤー)。
 
 ## 不採用案
 
@@ -92,17 +90,21 @@ CI で `--generate-notes` の出力を CHANGELOG.md に prepend して push す�
 
 ### C. tag push トリガ (`on: push: tags: ["v*"]`)
 
-stable-which が採用しているパターン。ローカルで `jj tag set` + `jj git push --tag` する必要があり、port-peeker / authsock-warden の Cargo.toml 変化検知の方が「ローカルではタグ操作不要」で軽い。
+stable-which が採用しているパターン。**設計上の優位性で却下する**:
 
-## 実装手順
+- **SSOT (Single Source of Truth)**: Cargo.toml 内部の `version` 行は `cargo publish` 等の他ツールも参照する事実上の version SSOT。タグだけ後で打つと「`v1.2.3` がどの commit を指すか」がコード本体と乖離しうる
+- **整合の自動化**: Cargo.toml 変化検知なら version 変更は必ず commit に乗り、tag は CI が `gh release create --target <sha>` で commit と同時に作る → コードベースと tag が常に一致
+- **副次効果**: ローカルでタグ操作が不要になることは派生的な利点 (主たる根拠ではない)
 
-1. `CHANGELOG.md` を削除
-2. `justfile::release` を `bump-version` に置き換え (port-peeker 流)
-3. INDEX.md に DR-0003 追加
-4. commit + push (リリースは発生しない、Cargo.toml 変更がないため)
+## 実装
+
+- `CHANGELOG.md` 削除済 (本 DR と同じ commit に含む)
+- `justfile::release` を `bump-version` に置き換え済 (port-peeker 流に痩せさせた)
+- `bump-version` の `sed` は BSD/GNU 両対応の `-i.bak ... && rm -f ...` 形式
+- INDEX.md に DR-0003 追記済
 
 ## 関連
 
-- findings: docs/findings/2026-05-08-release-workflow-research.md
+- findings: `docs/findings/2026-05-08-release-workflow-research.md` (調査経緯)
+- findings: `docs/findings/2026-05-09-justfile-template-research.md` (justfile 共通テンプレと依存トポロジー)
 - 参考実装: kawaz/port-peeker, kawaz/authsock-warden
-- DR-0001 (寛容な未知オプション pass-through), DR-0002 (自己報告メカニズム): bump-version の依存階層 `ensure-clean test build` は両 DR の lint→ensure-clean パターンと整合

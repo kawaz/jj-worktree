@@ -80,8 +80,25 @@ Include: the option/error, the calling context, and what you tried to do.
 
 - ログの自動 rotate / 圧縮: 必要になったら別途実装
 - 重複検出 (同じ unknown_option を複数回ログしない): MVP では not required
-- **Linux 以外の `caller_cmdline` 取得**: `/proc` がない macOS は `ps -p <pid> -o command=` 等にフォールバック、取れなければ空文字
 - 設定による無効化: 環境変数 `JJ_WORKTREE_DISABLED=1` で shim 全体が無効になるので、その場合はログも出ない
+
+## プライバシー / 脅威モデル
+
+### `caller_cmdline` の機微情報問題
+
+親プロセスの argv には API トークン / パスワード / 内部 AI プロンプト等が含まれる可能性がある (例: `claude -p "long prompt..."`、`gh auth login --with-token <(...)`)。これらをローカルログに長期保存するのはプライバシーリスク。
+
+採用した緩和策:
+
+1. **デフォルトでは basename のみ取得**: Linux は `/proc/<pid>/comm`、macOS は `ps -p <pid> -o comm=` でプロセス名だけを記録する。フル argv が必要な場合のみ `JJ_WORKTREE_ISSUE_INCLUDE_CMDLINE=1` を opt-in で設定
+2. **ログファイルを `0600` パーミッションで作成**: 同一マシン上の他ユーザがログを読めないようにする。親ディレクトリは `0700`
+3. **`ps` 呼び出しに 200ms タイムアウト**: 異常な環境で shim 全体が固まらないようにする (取れなければ空文字)
+
+### env 変数での挙動制御の信頼境界
+
+`JJ_WORKTREE_DISABLED=1` / `JJ_WORKTREE_ISSUE_QUIET=1` / `JJ_WORKTREE_ISSUE_LOG=<path>` は env 変数で制御するため、**シェルを取られている攻撃者は自己報告メカニズムを抑止できる**。これは env 駆動な仕組みの本質的な限界で、コード側で防御するスコープではない (env を仕込める時点で攻撃者はより強い primitive を持っている)。
+
+ローカルログの `JJ_WORKTREE_ISSUE_LOG` への悪用 (symlink 攻撃で書き込み可能ファイルに JSON 1行 append) も同種の制約。`0600` で他ユーザからの読み取りを防ぐが、env を仕込めるシェル下では完全な防御はない。
 
 ## トレードオフ
 
