@@ -4,67 +4,67 @@
 default:
     @just --list
 
+# ビルドして実行
+run *ARGS: build
+    ./target/release/jj-worktree {{ARGS}}
+
 # ビルド (release)
 build:
     cargo build --release
 
-# テスト
 test:
     cargo test
 
-# lint + format チェック
-check:
-    cargo fmt --check
+check: lint fmt
+
+lint:
     cargo clippy -- -D warnings
 
-# 翻訳ペアの整合性チェック (タイトル直下の相互リンク + 更新タイミング)
-check-translations:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    fail=0
-    for ja in README-ja.md DESIGN-ja.md MANUAL-ja.md; do
-        en="${ja/-ja/}"
-        # ja が存在しなければそのペアはスキップ (MANUAL は任意)
-        [ -f "$ja" ] || continue
-        if [ ! -f "$en" ]; then
-            echo "ERROR: $ja exists but $en is missing" >&2
-            fail=1
-            continue
-        fi
-        # 相互リンク (先頭5行内)
-        if ! head -5 "$ja" | grep -qE '\[English\].*\| 日本語'; then
-            echo "ERROR: $ja: missing '[English](./$en) | 日本語' link near the top" >&2
-            fail=1
-        fi
-        if ! head -5 "$en" | grep -qE 'English \|.*\[日本語\]'; then
-            echo "ERROR: $en: missing 'English | [日本語](./$ja)' link near the top" >&2
-            fail=1
-        fi
-        # git log の commit timestamp 比較 (jj 環境では git log が動くこと前提)
-        ja_ts=$(git --git-dir=.git log -1 --format=%ct -- "$ja" 2>/dev/null || echo 0)
-        en_ts=$(git --git-dir=.git log -1 --format=%ct -- "$en" 2>/dev/null || echo 0)
-        if [ "$ja_ts" -gt 0 ] && [ "$en_ts" -gt 0 ] && [ "$ja_ts" -gt "$en_ts" ]; then
-            echo "ERROR: $ja was updated after $en. Update the English translation before pushing." >&2
-            fail=1
-        fi
-    done
-    [ "$fail" -eq 0 ]
-
-# format 適用
 fmt:
     cargo fmt
-
-# ワーキングコピーがクリーン（empty）であることを確認
-ensure-clean:
-    test "$(jj log -r @ --no-graph -T 'empty')" = "true"
 
 # push (check + test + check-translations を通してから push)
 push: check test check-translations
     jj git push
 
-# ビルドして実行
-run *ARGS: build
-    ./target/release/jj-worktree {{ARGS}}
+# ワーキングコピーがクリーン（empty）であることを確認
+ensure-clean:
+    test "$(jj log -r @ --no-graph -T 'empty')" = "true"
+
+# 翻訳ペア (*-ja.md / *.md) の整合性チェック
+# テンプレ: ~/.claude/rules/docs-structure.md の「check-translations の実装」セクション
+# - リポジトリ内のすべての *-ja.md を発見
+# - 対応する *.md の存在 + 相互リンク + commit timestamp 順序を検証
+check-translations: ensure-clean
+    #!/usr/bin/env bash
+    set -euo pipefail
+    die() { echo "$*" >&2; exit 1; }
+
+    # commit timestamp 取得 (jj 管理リポジトリなら jj log、それ以外は git log)
+    file_ts() {
+        local f="$1"
+        if [ -d .jj ]; then
+            jj log --no-graph -T 'committer.timestamp().format("%s")' \
+                -r "latest(::@ & files('$f'))" 2>/dev/null || echo 0
+        else
+            git log -1 --format=%ct -- "$f" 2>/dev/null || echo 0
+        fi
+    }
+
+    while IFS= read -r ja; do
+        en="${ja/-ja/}"
+        [ -f "$en" ] || die "ERROR: $ja exists but $en is missing"
+        # 相互リンク (先頭 5 行内、固定文字列で正確に検出)
+        head -5 "$ja" | grep -qF "> [English](./${en##*/}) | 日本語" \
+            || die "ERROR: $ja: missing '> [English](./${en##*/}) | 日本語' link near the top"
+        head -5 "$en" | grep -qF "> English | [日本語](./${ja##*/})" \
+            || die "ERROR: $en: missing '> English | [日本語](./${ja##*/})' link near the top"
+        # ja のほうが新しい (= en の翻訳が遅れている) ことを検出
+        ja_ts=$(file_ts "$ja")
+        en_ts=$(file_ts "$en")
+        [ "$ja_ts" -le "$en_ts" ] \
+            || die "ERROR: $ja was updated after $en. Update the English translation before pushing."
+    done < <(find . -name '*-ja.md' -not -path './.git/*' -not -path './.jj/*')
 
 # リリース (bump: major, minor, patch)
 release bump="patch": ensure-clean check test build
@@ -104,3 +104,4 @@ release bump="patch": ensure-clean check test build
     sleep 3
     run_id=$(gh run list --repo kawaz/jj-worktree --limit 1 --json databaseId -q '.[0].databaseId')
     gh run watch "$run_id" --repo kawaz/jj-worktree
+ 
