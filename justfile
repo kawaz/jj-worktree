@@ -8,14 +8,47 @@ default:
 build:
     cargo build --release
 
-# テスト
+# テスト (env var を共有するテストがあるため serial 実行)
 test:
-    cargo test
+    cargo test -- --test-threads=1
 
 # lint + format チェック
 check:
     cargo fmt --check
     cargo clippy -- -D warnings
+
+# 翻訳ペアの整合性チェック (タイトル直下の相互リンク + 更新タイミング)
+check-translations:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fail=0
+    for ja in README-ja.md DESIGN-ja.md MANUAL-ja.md; do
+        en="${ja/-ja/}"
+        # ja が存在しなければそのペアはスキップ (MANUAL は任意)
+        [ -f "$ja" ] || continue
+        if [ ! -f "$en" ]; then
+            echo "ERROR: $ja exists but $en is missing" >&2
+            fail=1
+            continue
+        fi
+        # 相互リンク (先頭5行内)
+        if ! head -5 "$ja" | grep -qE '\[English\].*\| 日本語'; then
+            echo "ERROR: $ja: missing '[English](./$en) | 日本語' link near the top" >&2
+            fail=1
+        fi
+        if ! head -5 "$en" | grep -qE 'English \|.*\[日本語\]'; then
+            echo "ERROR: $en: missing 'English | [日本語](./$ja)' link near the top" >&2
+            fail=1
+        fi
+        # git log の commit timestamp 比較 (jj 環境では git log が動くこと前提)
+        ja_ts=$(git --git-dir=.git log -1 --format=%ct -- "$ja" 2>/dev/null || echo 0)
+        en_ts=$(git --git-dir=.git log -1 --format=%ct -- "$en" 2>/dev/null || echo 0)
+        if [ "$ja_ts" -gt 0 ] && [ "$en_ts" -gt 0 ] && [ "$ja_ts" -gt "$en_ts" ]; then
+            echo "ERROR: $ja was updated after $en. Update the English translation before pushing." >&2
+            fail=1
+        fi
+    done
+    [ "$fail" -eq 0 ]
 
 # format 適用
 fmt:
@@ -25,8 +58,8 @@ fmt:
 ensure-clean:
     test "$(jj log -r @ --no-graph -T 'empty')" = "true"
 
-# push (check + test を通してから push)
-push: check test
+# push (check + test + check-translations を通してから push)
+push: check test check-translations
     jj git push
 
 # ビルドして実行
