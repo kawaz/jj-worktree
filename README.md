@@ -4,6 +4,17 @@
 
 A git shim that translates `git worktree` operations to `jj workspace` commands.
 
+**Who is this for**: jj users who run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with `isolation: "worktree"` enabled (or any other tool that issues `git worktree` calls inside a jj repository). If you don't use such tools, you probably don't need jj-worktree.
+
+## Quick start
+
+```bash
+brew install kawaz/tap/jj-worktree
+jj-worktree run claude       # launch Claude Code with the shim active for all child processes
+```
+
+`jj-worktree run <cmd>` symlinks `git → jj-worktree` into a directory it prepends to `PATH`, then `exec`s `<cmd>`. Inside that subprocess, `git worktree` (and a few related `git` calls) are translated to `jj workspace`. Without `jj-worktree run`, the shim is **not active** — Claude Code launched directly will keep using the real `git`.
+
 ## Why
 
 Tools like [Claude Code](https://docs.anthropic.com/en/docs/claude-code) use `git worktree` for parallel session isolation. In jj repositories, git operations like `git status` and ref resolution don't work correctly, causing the worktree workflow to fail. jj-worktree bridges this gap by intercepting `git worktree` calls and converting them to equivalent `jj workspace` operations.
@@ -35,6 +46,8 @@ A symlink `git -> jj-worktree` is placed at the front of `PATH`. Inside a jj rep
 ```bash
 brew install kawaz/tap/jj-worktree
 ```
+
+`kawaz/tap` refers to the [`kawaz/homebrew-tap`](https://github.com/kawaz/homebrew-tap) repository. Equivalent two-step form: `brew tap kawaz/tap && brew install jj-worktree`.
 
 Or build from source:
 

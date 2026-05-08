@@ -4,6 +4,17 @@
 
 `git worktree` の操作を `jj workspace` コマンドに変換する git shim。
 
+**対象ユーザ**: jj 上で [Claude Code](https://docs.anthropic.com/en/docs/claude-code) を `isolation: "worktree"` で使う、もしくは jj リポジトリ内で `git worktree` を呼ぶツールを使うユーザ。それ以外の場合はおそらく不要です。
+
+## クイックスタート
+
+```bash
+brew install kawaz/tap/jj-worktree
+jj-worktree run claude       # shim を有効化した状態で Claude Code を起動 (子プロセス全部に効く)
+```
+
+`jj-worktree run <cmd>` は `git → jj-worktree` の symlink を作って `PATH` の先頭に追加し、`<cmd>` を `exec` します。子プロセス内で `git worktree` (および関連する一部の `git` サブコマンド) が `jj workspace` に翻訳されます。`jj-worktree run` を経由しないと shim は **有効になりません** — Claude Code を直接起動した場合は素の `git` が呼ばれます。
+
 ## なぜ必要か
 
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) のようなツールは、並列セッションの分離に `git worktree` を使います。しかし jj リポジトリでは `git status` や ref 解決といった git 操作が正しく動作せず、worktree のワークフローが破綻してしまいます。jj-worktree は `git worktree` の呼び出しを横取りして、等価な `jj workspace` 操作に変換することで、このギャップを埋めます。
@@ -35,6 +46,8 @@ argv[0] == "jj-worktree" -> direct モード: workspace コマンドを直接実
 ```bash
 brew install kawaz/tap/jj-worktree
 ```
+
+`kawaz/tap` は [`kawaz/homebrew-tap`](https://github.com/kawaz/homebrew-tap) リポジトリのこと。同等の2ステップ形式: `brew tap kawaz/tap && brew install jj-worktree`。
 
 またはソースからビルド:
 

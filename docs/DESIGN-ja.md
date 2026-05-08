@@ -35,7 +35,8 @@ src/
 ├── worktree.rs   # add/list/remove: jj workspace 操作の実装
 ├── jj.rs         # jj コマンド実行ヘルパー、リポジトリ検出
 ├── meta.rs       # メタデータ CRUD (.jj-worktree-meta/*.json)
-└── issue_log.rs  # 自己報告メカニズム (DR-0002): unknown_option 等を JSONL 記録 + AI 誘導 stderr
+├── issue_log.rs  # 自己報告メカニズム (DR-0002): unknown_option 等を JSONL 記録 + AI 誘導 stderr
+└── test_util.rs  # テスト専用ヘルパー (env を mutate するテスト用の crate-wide env_lock)
 ```
 
 ### コマンドフロー
@@ -170,7 +171,7 @@ PATH 上に同一バイナリを指す `jj-worktree` エントリがあればイ
 | `JJ_WORKTREE_DISABLED=1` | shim を無効化、全コマンドを real git にフォールバック |
 | `JJ_WORKTREE_DEBUG=1` | デバッグログを stderr に JSONL 出力 |
 | `JJ_WORKTREE_LOG_FILE=<path>` | デバッグログをファイルに JSONL append 出力（DEBUG と併用可） |
-| `JJ_WORKTREE_REAL_GIT=/path` | real git バイナリパスを明示指定 |
+| `JJ_WORKTREE_REAL_GIT=<path>` | real git バイナリパスを明示指定 |
 | `JJ_WORKTREE_ISSUE_LOG=<path>` | 自己報告ログ (issues.log) のパスを上書き（既定: `${XDG_STATE_HOME:-$HOME/.local/state}/jj-worktree/issues.log`） |
 | `JJ_WORKTREE_ISSUE_QUIET=1` | 自己報告の stderr 出力を抑制（JSONL 記録は継続） |
 
@@ -214,14 +215,18 @@ Windows 非対応（symlink + exec が本質的に Unix 依存）。
 ### リリースフロー
 
 ```
-just release [patch|minor|major]
+just bump-version [patch|minor|major]
   ↓
-cargo fmt/clippy/test → バージョン bump → jj commit → tag → push
+ensure-clean → test → build → Cargo.toml の version 行を bump → jj describe + new → just push
   ↓
-GitHub Actions (release.yml)
+GitHub Actions (release.yml) が main の Cargo.toml 変化を検出
   ↓
-6ターゲットビルド → GitHub Release 作成 → homebrew-tap Formula 自動更新
+6ターゲットビルド → gh release create --target <sha> --generate-notes
+  ↓
+tag v<X.Y.Z> / GitHub Releases ノート / homebrew-tap Formula を自動作成・更新
 ```
+
+ローカルでの tag 操作を排除した経緯と CHANGELOG.md を `--generate-notes` に一任する判断は `docs/decisions/DR-0003-release-flow.md` を参照。
 
 ### インストール
 

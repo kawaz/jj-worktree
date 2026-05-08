@@ -35,7 +35,8 @@ src/
 ├── worktree.rs   # add/list/remove: implementation of jj workspace operations
 ├── jj.rs         # jj command execution helpers, repository detection
 ├── meta.rs       # metadata CRUD (.jj-worktree-meta/*.json)
-└── issue_log.rs  # self-reporting (DR-0002): JSONL log for unknown_option etc. + AI-directed stderr
+├── issue_log.rs  # self-reporting (DR-0002): JSONL log for unknown_option etc. + AI-directed stderr
+└── test_util.rs  # test-only helpers (crate-wide env_lock for tests that mutate env)
 ```
 
 ### Command flow
@@ -170,7 +171,7 @@ If a `jj-worktree` entry on PATH points to the same binary, it is treated as the
 | `JJ_WORKTREE_DISABLED=1` | Disable the shim; fall back all commands to real git |
 | `JJ_WORKTREE_DEBUG=1` | Emit debug logs as JSONL on stderr |
 | `JJ_WORKTREE_LOG_FILE=<path>` | Append debug logs to a file as JSONL (can be combined with DEBUG) |
-| `JJ_WORKTREE_REAL_GIT=/path` | Explicitly specify the path to the real git binary |
+| `JJ_WORKTREE_REAL_GIT=<path>` | Explicitly specify the path to the real git binary |
 | `JJ_WORKTREE_ISSUE_LOG=<path>` | Override the self-reporting issues log path (default: `${XDG_STATE_HOME:-$HOME/.local/state}/jj-worktree/issues.log`) |
 | `JJ_WORKTREE_ISSUE_QUIET=1` | Suppress the self-report stderr block (the JSONL log is still written) |
 
@@ -214,14 +215,18 @@ Windows is not supported (symlink + exec are inherently Unix-dependent).
 ### Release flow
 
 ```
-just release [patch|minor|major]
+just bump-version [patch|minor|major]
   ↓
-cargo fmt/clippy/test → version bump → jj commit → tag → push
+ensure-clean → test → build → bump Cargo.toml → jj describe + new → just push
   ↓
-GitHub Actions (release.yml)
+GitHub Actions (release.yml) detects Cargo.toml change on main
   ↓
-build for 6 targets → create GitHub Release → automatically update homebrew-tap Formula
+build for 6 targets → gh release create --target <sha> --generate-notes
+  ↓
+auto-create tag v<X.Y.Z>, GitHub Release notes, and homebrew-tap Formula update
 ```
+
+See `docs/decisions/DR-0003-release-flow.md` for the rationale (why local-only tag operations are avoided, why CHANGELOG.md is delegated to `--generate-notes`).
 
 ### Installation
 
