@@ -1,8 +1,24 @@
 use std::path::{Path, PathBuf};
 
-use crate::{jj, meta};
+use crate::{issue_log, jj, meta};
 
 const PROTECTED_WORKSPACES: &[&str] = &["default", "main"];
+
+/// `git worktree add` flags accepted as no-ops because their semantics do not
+/// apply to `jj workspace`. Keeping these silent (no AI-directed warning)
+/// prevents noise for routine calls. See DR-0001.
+const KNOWN_NO_VALUE_FLAGS: &[&str] = &[
+    "--track",
+    "--no-track",
+    "--lock",
+    "--guess-remote",
+    "--no-guess-remote",
+    "--detach",
+];
+
+/// `git worktree add` flags that take a value, accepted as no-ops. The value
+/// is consumed alongside the flag.
+const KNOWN_VALUE_FLAGS: &[&str] = &["--reason"];
 
 /// Parse workspace names from `jj workspace list` output.
 /// Each line format: "<wsname>: <change-id> <description>"
@@ -47,7 +63,8 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, Box<dyn std::error::Error>
     let mut i = 0;
 
     while i < args.len() {
-        match args[i].as_str() {
+        let arg = &args[i];
+        match arg.as_str() {
             "-b" | "-B" => {
                 i += 1;
                 if i >= args.len() {
@@ -55,16 +72,44 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, Box<dyn std::error::Error>
                 }
                 branch = Some(args[i].clone());
             }
-            arg if arg.starts_with('-') => {
-                return Err(format!("unknown option: {arg}").into());
+            a if KNOWN_NO_VALUE_FLAGS.contains(&a) => {
+                jj::debug_message(&format!("ignoring known no-op flag: {a}"));
+            }
+            a if KNOWN_VALUE_FLAGS.contains(&a) => {
+                jj::debug_message(&format!("ignoring known no-op flag with value: {a}"));
+                i += 1; // consume the value, if present
+            }
+            a if a.starts_with("--") && a.contains('=') => {
+                // --xxx=val: single-arg form. Accept as no-op and report.
+                let opt_name = a.split_once('=').map(|(n, _)| n).unwrap_or(a);
+                if !KNOWN_NO_VALUE_FLAGS.contains(&opt_name)
+                    && !KNOWN_VALUE_FLAGS.contains(&opt_name)
+                {
+                    issue_log::report(
+                        issue_log::IssueKind::UnknownOption,
+                        "git worktree add",
+                        Some(opt_name),
+                        args,
+                    );
+                }
+            }
+            a if a.starts_with('-') => {
+                // Unknown bare flag: accept as no-op (do not consume next arg
+                // because we cannot tell if it is a value or a positional).
+                issue_log::report(
+                    issue_log::IssueKind::UnknownOption,
+                    "git worktree add",
+                    Some(a),
+                    args,
+                );
             }
             _ => {
                 if path.is_none() {
-                    path = Some(args[i].clone());
+                    path = Some(arg.clone());
                 } else if commit_ish.is_none() {
-                    commit_ish = Some(args[i].clone());
+                    commit_ish = Some(arg.clone());
                 } else {
-                    return Err(format!("unexpected argument: {}", args[i]).into());
+                    return Err(format!("unexpected argument: {arg}").into());
                 }
             }
         }
@@ -487,4 +532,195 @@ fn normalize_path(path: &Path) -> PathBuf {
         }
     }
     components.iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    /// Quiet the AI-directed stderr block emitted by `issue_log::report` and
+    /// redirect the JSONL log to a tempfile so tests don't pollute the real
+    /// `~/.local/state/jj-worktree/issues.log`.
+    struct IssueLogGuard {
+        log_file: PathBuf,
+        prev_log: Option<std::ffi::OsString>,
+        prev_quiet: Option<std::ffi::OsString>,
+    }
+    impl IssueLogGuard {
+        fn new() -> Self {
+            let key = "JJ_WORKTREE_ISSUE_LOG";
+            let qkey = "JJ_WORKTREE_ISSUE_QUIET";
+            let prev_log = std::env::var_os(key);
+            let prev_quiet = std::env::var_os(qkey);
+            let log_file = std::env::temp_dir().join(format!(
+                "jj-worktree-parse-add-args-test-{}-{}.log",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            unsafe {
+                std::env::set_var(key, &log_file);
+                std::env::set_var(qkey, "1");
+            }
+            Self {
+                log_file,
+                prev_log,
+                prev_quiet,
+            }
+        }
+    }
+    impl Drop for IssueLogGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.log_file);
+            unsafe {
+                let key = "JJ_WORKTREE_ISSUE_LOG";
+                let qkey = "JJ_WORKTREE_ISSUE_QUIET";
+                match self.prev_log.take() {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+                match self.prev_quiet.take() {
+                    Some(v) => std::env::set_var(qkey, v),
+                    None => std::env::remove_var(qkey),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_add_args_basic_path() {
+        let _g = IssueLogGuard::new();
+        let parsed = parse_add_args(&s(&["../foo"])).unwrap();
+        assert_eq!(parsed.path, "../foo");
+        assert!(parsed.branch.is_none());
+        assert!(parsed.commit_ish.is_none());
+    }
+
+    #[test]
+    fn parse_add_args_with_branch() {
+        let _g = IssueLogGuard::new();
+        let parsed = parse_add_args(&s(&["-b", "feat/x", "../foo"])).unwrap();
+        assert_eq!(parsed.branch, Some("feat/x".to_string()));
+        assert_eq!(parsed.path, "../foo");
+    }
+
+    #[test]
+    fn parse_add_args_with_uppercase_b_branch() {
+        let _g = IssueLogGuard::new();
+        let parsed = parse_add_args(&s(&["-B", "feat/x", "../foo"])).unwrap();
+        assert_eq!(parsed.branch, Some("feat/x".to_string()));
+        assert_eq!(parsed.path, "../foo");
+    }
+
+    #[test]
+    fn parse_add_args_with_commit_ish() {
+        let _g = IssueLogGuard::new();
+        let parsed = parse_add_args(&s(&["../foo", "main"])).unwrap();
+        assert_eq!(parsed.path, "../foo");
+        assert_eq!(parsed.commit_ish, Some("main".to_string()));
+    }
+
+    #[test]
+    fn parse_add_args_no_track_is_accepted_as_noop() {
+        let _g = IssueLogGuard::new();
+        let parsed = parse_add_args(&s(&["--no-track", "../foo", "main"])).unwrap();
+        assert_eq!(parsed.path, "../foo");
+        assert_eq!(parsed.commit_ish, Some("main".to_string()));
+    }
+
+    #[test]
+    fn parse_add_args_track_is_accepted_as_noop() {
+        let _g = IssueLogGuard::new();
+        let parsed = parse_add_args(&s(&["--track", "../foo"])).unwrap();
+        assert_eq!(parsed.path, "../foo");
+    }
+
+    #[test]
+    fn parse_add_args_detach_is_accepted_as_noop() {
+        let _g = IssueLogGuard::new();
+        let parsed = parse_add_args(&s(&["--detach", "../foo"])).unwrap();
+        assert_eq!(parsed.path, "../foo");
+    }
+
+    #[test]
+    fn parse_add_args_lock_is_accepted_as_noop() {
+        let _g = IssueLogGuard::new();
+        let parsed = parse_add_args(&s(&["--lock", "../foo"])).unwrap();
+        assert_eq!(parsed.path, "../foo");
+    }
+
+    #[test]
+    fn parse_add_args_reason_consumes_value() {
+        let _g = IssueLogGuard::new();
+        // --reason VAL must consume VAL, leaving "../foo" as the path.
+        let parsed = parse_add_args(&s(&["--reason", "doing-stuff", "../foo"])).unwrap();
+        assert_eq!(parsed.path, "../foo");
+        assert!(parsed.commit_ish.is_none());
+    }
+
+    #[test]
+    fn parse_add_args_guess_remote_variants_accepted() {
+        let _g = IssueLogGuard::new();
+        assert!(parse_add_args(&s(&["--guess-remote", "../foo"])).is_ok());
+        assert!(parse_add_args(&s(&["--no-guess-remote", "../foo"])).is_ok());
+    }
+
+    #[test]
+    fn parse_add_args_unknown_flag_is_accepted_with_log() {
+        let g = IssueLogGuard::new();
+        let parsed = parse_add_args(&s(&["--brand-new-flag", "../foo"])).unwrap();
+        assert_eq!(parsed.path, "../foo");
+        // Verify the JSONL log captured the unknown option.
+        let content = std::fs::read_to_string(&g.log_file).expect("log written");
+        assert!(content.contains("unknown_option"));
+        assert!(content.contains("--brand-new-flag"));
+    }
+
+    #[test]
+    fn parse_add_args_unknown_equals_form_is_accepted_with_log() {
+        let g = IssueLogGuard::new();
+        let parsed = parse_add_args(&s(&["--brand-new-flag=val", "../foo"])).unwrap();
+        assert_eq!(parsed.path, "../foo");
+        let content = std::fs::read_to_string(&g.log_file).expect("log written");
+        // The option name (without "=val") should be reported.
+        assert!(content.contains("--brand-new-flag"));
+        // The "=val" suffix must not break path parsing — single-arg consumption.
+        assert!(parsed.commit_ish.is_none());
+    }
+
+    #[test]
+    fn parse_add_args_known_flag_does_not_log() {
+        let g = IssueLogGuard::new();
+        let _ = parse_add_args(&s(&["--no-track", "../foo"])).unwrap();
+        // The log file must not be created for known flags.
+        assert!(
+            !g.log_file.exists() || std::fs::read_to_string(&g.log_file).unwrap().is_empty(),
+            "known no-op flags should not trigger issue logging"
+        );
+    }
+
+    #[test]
+    fn parse_add_args_missing_path_errors() {
+        let _g = IssueLogGuard::new();
+        assert!(parse_add_args(&s(&[])).is_err());
+        assert!(parse_add_args(&s(&["--no-track"])).is_err());
+    }
+
+    #[test]
+    fn parse_add_args_b_without_value_errors() {
+        let _g = IssueLogGuard::new();
+        assert!(parse_add_args(&s(&["-b"])).is_err());
+    }
+
+    #[test]
+    fn parse_add_args_too_many_positionals_errors() {
+        let _g = IssueLogGuard::new();
+        assert!(parse_add_args(&s(&["a", "b", "c"])).is_err());
+    }
 }

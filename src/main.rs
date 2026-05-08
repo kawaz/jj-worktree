@@ -1,3 +1,4 @@
+mod issue_log;
 mod jj;
 mod meta;
 mod shim;
@@ -28,11 +29,13 @@ Options:
   --version    Show version
 
 Environment variables:
-  JJ_WORKTREE_DISABLED   Set to 1 to disable shim and pass through to real git
-  JJ_WORKTREE_DEBUG      Set to 1 to log to stderr (JSONL format)
-  JJ_WORKTREE_LOG_FILE   Append debug logs to a file (JSONL format)
-  JJ_WORKTREE_REAL_GIT   Override path to real git binary
-  JJ_WORKTREE_DETECT     Set to 1 to probe: prints 'jj-worktree' and exits"
+  JJ_WORKTREE_DISABLED     Set to 1 to disable shim and pass through to real git
+  JJ_WORKTREE_DEBUG        Set to 1 to log to stderr (JSONL format)
+  JJ_WORKTREE_LOG_FILE     Append debug logs to a file (JSONL format)
+  JJ_WORKTREE_REAL_GIT     Override path to real git binary
+  JJ_WORKTREE_ISSUE_LOG    Override the self-report issues log path
+  JJ_WORKTREE_ISSUE_QUIET  Set to 1 to suppress the [For AI agents] stderr block
+  JJ_WORKTREE_DETECT       Set to 1 to probe: prints 'jj-worktree' and exits"
     );
 }
 
