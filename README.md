@@ -1,5 +1,7 @@
 # jj-worktree
 
+> English | [日本語](./README-ja.md)
+
 A git shim that translates `git worktree` operations to `jj workspace` commands.
 
 ## Why
@@ -69,6 +71,12 @@ jj-worktree remove [--force] <path>
 | `JJ_WORKTREE_DEBUG=1` | Print debug logs to stderr (JSONL) |
 | `JJ_WORKTREE_LOG_FILE=<path>` | Append debug logs to file (JSONL) |
 | `JJ_WORKTREE_REAL_GIT=<path>` | Explicitly set the real git binary path |
+| `JJ_WORKTREE_ISSUE_LOG=<path>` | Override the self-report log path (default: `${XDG_STATE_HOME:-$HOME/.local/state}/jj-worktree/issues.log`) |
+| `JJ_WORKTREE_ISSUE_QUIET=1` | Suppress the `[For AI agents]` stderr block (JSONL log still written) |
+
+## Unknown option handling
+
+`git worktree add` flags that have no `jj workspace` equivalent (`--track`, `--no-track`, `--lock`, `--reason`, `--guess-remote`, `--no-guess-remote`, `--detach`) are silently accepted as no-ops. Other unknown flags are also accepted, but each occurrence is recorded in the JSONL self-report log and an `[For AI agents]` block is emitted to stderr so AI-driven callers do not silently fall back. See [docs/decisions/DR-0001](./docs/decisions/DR-0001-lenient-unknown-options.md) and [DR-0002](./docs/decisions/DR-0002-self-reporting-mechanism.md).
 
 ## License
 

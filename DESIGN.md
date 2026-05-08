@@ -1,45 +1,48 @@
-# jj-worktree 設計書
+# jj-worktree Design Document
 
-## 背景
+> English | [日本語](./DESIGN-ja.md)
 
-Claude Code は `git worktree` による並列セッション隔離機能を持つが、jj リポジトリでは:
-- `.git` があるため git リポジトリと判定され、git 経由の操作が試みられる
-- しかし `git status` や ref 解決など git の各種操作が jj 環境では正しく動作せず、worktree フロー全体が破綻する
-- WorktreeCreate/WorktreeRemove hooks は git リポジトリ内で無視される (Issue #36205)
+## Background
 
-## 解決策
+Claude Code provides parallel session isolation via `git worktree`, but in jj repositories:
+- The presence of `.git` causes the directory to be detected as a git repository, and git-based operations are attempted
+- However, git operations such as `git status` and ref resolution do not work correctly in a jj environment, breaking the entire worktree flow
+- WorktreeCreate/WorktreeRemove hooks are ignored inside git repositories (Issue #36205)
 
-`git` コマンドの shim を作り、`worktree` サブコマンドだけ jj workspace に変換する。
+## Solution
 
-## アーキテクチャ
+Build a shim for the `git` command that translates only the `worktree` subcommand into jj workspace operations.
 
-### busybox パターン
+## Architecture
 
-単一バイナリが `argv[0]` で動作モードを切り替える:
+### busybox pattern
+
+A single binary switches its operating mode based on `argv[0]`:
 
 ```
-argv[0] == "git"          → shim モード (shim.rs)
-argv[0] == "jj-worktree"  → 直接モード (main.rs → worktree.rs)
+argv[0] == "git"          → shim mode (shim.rs)
+argv[0] == "jj-worktree"  → direct mode (main.rs → worktree.rs)
 ```
 
-symlink で `git → jj-worktree` を作成し、PATH の先頭に置くことで透過的に動作。
+By creating a `git → jj-worktree` symlink and placing it at the front of PATH, it operates transparently.
 
-### モジュール構成
+### Module layout
 
 ```
 src/
-├── main.rs       # エントリポイント、argv[0] 判定、run コマンド
-├── shim.rs       # git shim: グローバルオプション解析、real git 検出、コマンド振り分け
-├── worktree.rs   # add/list/remove: jj workspace 操作の実装
-├── jj.rs         # jj コマンド実行ヘルパー、リポジトリ検出
-└── meta.rs       # メタデータ CRUD (.jj-worktree-meta/*.json)
+├── main.rs       # entry point, argv[0] dispatch, run command
+├── shim.rs       # git shim: global option parsing, real git detection, command dispatch
+├── worktree.rs   # add/list/remove: implementation of jj workspace operations
+├── jj.rs         # jj command execution helpers, repository detection
+├── meta.rs       # metadata CRUD (.jj-worktree-meta/*.json)
+└── issue_log.rs  # self-reporting (DR-0002): JSONL log for unknown_option etc. + AI-directed stderr
 ```
 
-### コマンドフロー
+### Command flow
 
 ```
 git worktree add -B branch path origin/main
-  ↓ shim.rs: argv[0]=="git" → parse global opts → subcmd=="worktree" → .jj あり
+  ↓ shim.rs: argv[0]=="git" → parse global opts → subcmd=="worktree" → .jj present
   ↓ worktree.rs: cmd_add()
   ├── jj workspace add <path>
   ├── jj bookmark set <branch> -r <wsname>@
@@ -49,61 +52,61 @@ git worktree add -B branch path origin/main
 
 git worktree list
   ↓ worktree.rs: cmd_list()
-  ├── jj workspace list → workspace 名一覧
-  ├── 各 workspace: メタデータ or repo_root/ws_name でパス取得
-  ├── jj log -r '<ws>@' で commit hash + bookmarks 取得
-  └── git worktree list 互換フォーマットで出力
+  ├── jj workspace list → list of workspace names
+  ├── for each workspace: get path from metadata or repo_root/ws_name
+  ├── jj log -r '<ws>@' to obtain commit hash + bookmarks
+  └── output in git worktree list compatible format
 
 git worktree remove <path>
   ↓ worktree.rs: cmd_remove()
-  ├── パス → canonical path に正規化
-  ├── main/default workspace → 拒否
-  ├── --force なし: 未コミット変更チェック
-  ├── メタデータの bookmark → jj bookmark delete
+  ├── normalize path → canonical path
+  ├── main/default workspace → reject
+  ├── without --force: check for uncommitted changes
+  ├── bookmark from metadata → jj bookmark delete
   ├── jj workspace forget
-  ├── ディレクトリ削除
-  └── メタデータ削除
+  ├── remove directory
+  └── remove metadata
 
 git branch -d <name>
   ↓ shim.rs: subcmd=="branch" + -d/-D/--delete
-  ├── meta::find_by_bookmark() で管理対象か確認
-  ├── 管理対象 → jj bookmark delete
-  └── 非管理対象 → real git にフォールバック
+  ├── meta::find_by_bookmark() to check whether it is managed
+  ├── managed → jj bookmark delete
+  └── not managed → fall back to real git
 
 git status [--porcelain] [-C <path>]
-  ↓ shim.rs: subcmd=="status" + jj repo 内
-  ├── jj diff --summary を実行
-  ├── 出力を git porcelain v1 形式に変換 (M→" M", A→"??", D→" D")
-  └── jj diff 失敗時は real git にフォールバック
+  ↓ shim.rs: subcmd=="status" + inside jj repo
+  ├── run jj diff --summary
+  ├── convert output to git porcelain v1 format (M→" M", A→"??", D→" D")
+  └── on jj diff failure, fall back to real git
 
 git rev-parse [--verify] <ref>
-  ↓ shim.rs: subcmd=="rev-parse" + jj repo 内
-  ├── フラグ解析: --verify のみ許容、他フラグ → real git にフォールバック
-  ├── jj git export でリポジトリ状態を同期
-  ├── <ref> が "HEAD" の場合は "@" に変換
-  ├── jj log -r <ref> --no-graph -T commit_id で hash を取得
-  └── hash を出力（解決失敗時は real git にフォールバック）
+  ↓ shim.rs: subcmd=="rev-parse" + inside jj repo
+  ├── flag parsing: only --verify is allowed; other flags → fall back to real git
+  ├── jj git export to sync repository state
+  ├── if <ref> is "HEAD", convert to "@"
+  ├── jj log -r <ref> --no-graph -T commit_id to obtain hash
+  └── print the hash (on resolution failure, fall back to real git)
 
 git <other>
   ↓ shim.rs → exec_real_git() (Unix: process replace via exec)
 ```
 
-### git ref → jj ref 変換 (translate_git_ref)
+### git ref → jj ref translation (translate_git_ref)
 
-Claude Code は git 形式のリモート参照を渡す。jj では記法が異なるため変換が必要:
+Claude Code passes git-style remote references. Since jj uses different notation, translation is required:
 
-| git ref | jj ref | 備考 |
+| git ref | jj ref | Notes |
 |---------|--------|------|
 | `origin/main` | `main@origin` | remote/branch → branch@remote |
-| `origin/HEAD` | `trunk()` | リモート HEAD は trunk() で代替 |
-| `HEAD` | `@` | ワーキングコピーの現在リビジョン |
-| `abc1234` | `abc1234` | コミットハッシュはそのまま |
+| `origin/HEAD` | `trunk()` | remote HEAD is substituted with trunk() |
+| `HEAD` | `@` | the current revision of the working copy |
+| `abc1234` | `abc1234` | commit hashes are passed through unchanged |
 
-変換時に `jj git remote list` で既知のリモート名を確認し、リモート名に一致する場合のみ変換。
+During translation, `jj git remote list` is consulted to enumerate known remote names, and translation is applied only when the name matches a known remote.
 
-### git グローバルオプション解析 (parse_git_global_opts)
+### git global option parsing (parse_git_global_opts)
 
-shim が傍受する前に、git のグローバルオプションをスキップしてサブコマンドを特定する:
+Before the shim intercepts, it skips git's global options to identify the subcommand:
 
 ```
 git [-C path] [-c key=val] [--git-dir=path] [--work-tree=path]
@@ -112,21 +115,21 @@ git [-C path] [-c key=val] [--git-dir=path] [--work-tree=path]
     <subcommand> [args...]
 ```
 
-`-C <path>` は jj リポジトリ検出の起点として使用。
+`-C <path>` is used as the starting point for jj repository detection.
 
-### real git 検出 (find_real_git)
+### real git detection (find_real_git)
 
-1. `JJ_WORKTREE_REAL_GIT` 環境変数 → あればそのパスを使用
-2. PATH 走査 → `env::current_exe()` の canonical path と比較し、自分自身を除外
-3. 見つからなければエラー
+1. `JJ_WORKTREE_REAL_GIT` environment variable → if set, use that path
+2. PATH traversal → compare with the canonical path of `env::current_exe()` to exclude the binary itself
+3. If not found, return an error
 
-### jj リポジトリ検出 (find_repo_root)
+### jj repository detection (find_repo_root)
 
-カレントディレクトリ（または `-C` 指定パス）から上方向に `.jj` ディレクトリを探索。`jj root` コマンドは使わずファイルシステム確認のみで高速判定。`.jj` が見つからなければ全コマンドを real git にフォールバック。
+Walk upward from the current directory (or the path specified by `-C`), looking for a `.jj` directory. The `jj root` command is not used; only filesystem checks are performed for fast detection. If no `.jj` is found, all commands fall back to real git.
 
-## メタデータ
+## Metadata
 
-保存先: `<repo_root>/.jj-worktree-meta/<wsname>.json`
+Storage location: `<repo_root>/.jj-worktree-meta/<wsname>.json`
 
 ```json
 {
@@ -137,14 +140,14 @@ git [-C path] [-c key=val] [--git-dir=path] [--work-tree=path]
 }
 ```
 
-用途:
-- `list`: workspace の絶対パス取得
-- `remove`: path → workspace 名の逆引き、bookmark 名の取得
-- `branch -d`: bookmark 名 → 管理対象かの判定 (`find_by_bookmark`)
+Uses:
+- `list`: obtain absolute paths of workspaces
+- `remove`: reverse-lookup path → workspace name, and obtain bookmark name
+- `branch -d`: bookmark name → determine whether it is managed (`find_by_bookmark`)
 
-bookmark 削除はメタデータに記録された名前のみを対象とし、パターンマッチによる広範な削除は行わない。
+Bookmark deletion targets only names recorded in the metadata; broad deletion via pattern matching is not performed.
 
-## セットアップ方法
+## Setup
 
 ### `jj-worktree run`
 
@@ -152,41 +155,52 @@ bookmark 削除はメタデータに記録された名前のみを対象とし�
 jj-worktree run claude --worktree
 ```
 
-shim への symlink を作成し、PATH の先頭に追加してから `exec` でコマンドを起動。子プロセス全てで shim が有効になる。
+Creates a symlink to the shim, prepends it to PATH, and then `exec`s the command. The shim becomes effective in all child processes.
 
-symlink の配置先はバイナリの起動方法で分岐:
-- **インストール版** (PATH 上): `${XDG_CACHE_HOME:-$HOME/.cache}/jj-worktree/bin/git` — 複数セッションで共有
-- **開発版** (ローカルビルド等): `${TMPDIR}/jj-worktree.{hash}/git` — バイナリの canonical path をハッシュ化したキーで隔離。本番シムを上書きしない。OS 再起動時に自動クリーンアップ
+The symlink location is determined by how the binary was launched:
+- **Installed version** (on PATH): `${XDG_CACHE_HOME:-$HOME/.cache}/jj-worktree/bin/git` — shared across multiple sessions
+- **Development version** (local build, etc.): `${TMPDIR}/jj-worktree.{hash}/git` — isolated by a key derived from a hash of the binary's canonical path. Avoids overwriting the production shim. Automatically cleaned up on OS reboot
 
-PATH 上に同一バイナリを指す `jj-worktree` エントリがあればインストール版と判定し、brew upgrade でバージョン付きパスが消えても安定パス（例: `/opt/homebrew/bin/jj-worktree`）を symlink 先に使うことで耐障害性を確保。
+If a `jj-worktree` entry on PATH points to the same binary, it is treated as the installed version. Even if `brew upgrade` removes a versioned path, using a stable path (e.g. `/opt/homebrew/bin/jj-worktree`) as the symlink target ensures resilience.
 
-## 環境変数
+## Environment variables
 
-| 変数 | 用途 |
+| Variable | Purpose |
 |------|------|
-| `JJ_WORKTREE_DISABLED=1` | shim を無効化、全コマンドを real git にフォールバック |
-| `JJ_WORKTREE_DEBUG=1` | デバッグログを stderr に JSONL 出力 |
-| `JJ_WORKTREE_LOG_FILE=<path>` | デバッグログをファイルに JSONL append 出力（DEBUG と併用可） |
-| `JJ_WORKTREE_REAL_GIT=/path` | real git バイナリパスを明示指定 |
+| `JJ_WORKTREE_DISABLED=1` | Disable the shim; fall back all commands to real git |
+| `JJ_WORKTREE_DEBUG=1` | Emit debug logs as JSONL on stderr |
+| `JJ_WORKTREE_LOG_FILE=<path>` | Append debug logs to a file as JSONL (can be combined with DEBUG) |
+| `JJ_WORKTREE_REAL_GIT=/path` | Explicitly specify the path to the real git binary |
+| `JJ_WORKTREE_ISSUE_LOG=<path>` | Override the self-reporting issues log path (default: `${XDG_STATE_HOME:-$HOME/.local/state}/jj-worktree/issues.log`) |
+| `JJ_WORKTREE_ISSUE_QUIET=1` | Suppress the self-report stderr block (the JSONL log is still written) |
 
-ログ形式 (JSONL):
+Log format (JSONL):
 ```json
 {"ts":"2026-03-30T09:00:00.123Z","pid":1234,"msg":"exec real git: /usr/bin/git --version"}
 ```
 
-## 安全機構
+## Lenient pass-through of unknown options (DR-0001 / DR-0002)
 
-1. **main/default workspace 保護**: `remove` で削除を拒否
-2. **未コミット変更チェック**: `remove` で `jj diff --stat` を確認（`--force` で強制）
-3. **パス containment**: `remove` で対象パスが repo_root 配下かを検証
-4. **bookmark 削除のスコープ制限**: メタデータに記録された名前のみ対象
-5. **shim バイパス**: `JJ_WORKTREE_DISABLED=1` で即座に real git にフォールバック
+The set of options that callers (e.g. Claude Code) pass to `git worktree add` may grow as those callers evolve. `jj-worktree` handles this leniently:
 
-## ビルド・リリース
+1. **Explicit no-op list**: `--track` / `--no-track` / `--lock` / `--reason <val>` / `--guess-remote` / `--no-guess-remote` / `--detach` are silently ignored because there is no equivalent concept on the `jj workspace` side.
+2. **Unknown `--xxx` / `-x` flags**: instead of failing, the shim records a warning entry via `issue_log` and emits a `[For AI agents]` directed block on stderr, then accepts the flag as a no-op. Because the shim cannot tell whether a value follows, `--xxx=val` is consumed as a single argument, while a bare `--xxx` does not consume the next argument as a value.
 
-### ターゲット
+The self-report log (`issues.log`) records a `kind` of `unknown_option` / `parse_error` / `unsupported_combination`, plus `ts` / `cmd` / `option` / `argv` / `caller_pid` / `caller_cmdline`. This surfaces gaps to the user before AI agents silently fall back.
 
-| ターゲット | OS | Arch |
+## Safety mechanisms
+
+1. **main/default workspace protection**: `remove` rejects deletion
+2. **uncommitted change check**: `remove` checks `jj diff --stat` (override with `--force`)
+3. **path containment**: `remove` verifies that the target path is under repo_root
+4. **scoped bookmark deletion**: only names recorded in the metadata are targeted
+5. **shim bypass**: `JJ_WORKTREE_DISABLED=1` falls back to real git immediately
+
+## Build and release
+
+### Targets
+
+| Target | OS | Arch |
 |---|---|---|
 | `x86_64-unknown-linux-gnu` | Linux | x86_64 |
 | `x86_64-unknown-linux-musl` | Linux (static) | x86_64 |
@@ -195,52 +209,52 @@ PATH 上に同一バイナリを指す `jj-worktree` エントリがあればイ
 | `x86_64-apple-darwin` | macOS | Intel |
 | `aarch64-apple-darwin` | macOS | Apple Silicon |
 
-Windows 非対応（symlink + exec が本質的に Unix 依存）。
+Windows is not supported (symlink + exec are inherently Unix-dependent).
 
-### リリースフロー
+### Release flow
 
 ```
 just release [patch|minor|major]
   ↓
-cargo fmt/clippy/test → バージョン bump → jj commit → tag → push
+cargo fmt/clippy/test → version bump → jj commit → tag → push
   ↓
 GitHub Actions (release.yml)
   ↓
-6ターゲットビルド → GitHub Release 作成 → homebrew-tap Formula 自動更新
+build for 6 targets → create GitHub Release → automatically update homebrew-tap Formula
 ```
 
-### インストール
+### Installation
 
 ```bash
 brew install kawaz/tap/jj-worktree
 ```
 
-## テスト
+## Tests
 
-70 テスト (48 unit + 22 integration)
+70 tests (48 unit + 22 integration)
 
-### ユニットテスト
+### Unit tests
 
 - `jj.rs`: find_repo_root, build_command (4)
 - `meta.rs`: save/load/remove/list/serialization (9)
 - `shim.rs`: parse_git_global_opts (18), parse_branch_delete (6), parse_rev_parse_refs (9)
 - `main.rs`: invocation_mode, help (2)
 
-### 統合テスト (tests/integration.rs)
+### Integration tests (tests/integration.rs)
 
-各テストで一時ディレクトリに jj リポジトリを初期化して実行:
+Each test initializes a jj repository in a temporary directory before running:
 
-1. shim パススルー（.jj なし → real git）
-2. shim `-C` 対応
-3. jj 検出 + worktree リダイレクト
-4. add: workspace + bookmark + メタデータ
-5. add: bookmark なし / commit-ish 指定
-6. list: フォーマット / 空リポジトリ / shim 経由
-7. remove: 安全性チェック / main 保護 / 相対パス / shim 経由
-8. branch -d: 管理対象 → jj bookmark delete / 非管理対象 → real git
+1. shim pass-through (no .jj → real git)
+2. shim `-C` support
+3. jj detection + worktree redirection
+4. add: workspace + bookmark + metadata
+5. add: without bookmark / with commit-ish
+6. list: format / empty repository / via shim
+7. remove: safety checks / main protection / relative path / via shim
+8. branch -d: managed → jj bookmark delete / not managed → real git
 
-## リポジトリ
+## Repository
 
-- パス: `~/.local/share/repos/github.com/kawaz/jj-worktree/main/`
+- Path: `~/.local/share/repos/github.com/kawaz/jj-worktree/main/`
 - GitHub: https://github.com/kawaz/jj-worktree
 - Homebrew: `brew install kawaz/tap/jj-worktree`
