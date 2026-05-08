@@ -542,16 +542,19 @@ mod tests {
         args.iter().map(|a| a.to_string()).collect()
     }
 
-    /// Quiet the AI-directed stderr block emitted by `issue_log::report` and
-    /// redirect the JSONL log to a tempfile so tests don't pollute the real
-    /// `~/.local/state/jj-worktree/issues.log`.
+    /// Quiet the AI-directed stderr block emitted by `issue_log::report`,
+    /// redirect the JSONL log to a tempfile, and hold the crate-wide test env
+    /// lock for the lifetime of the guard so concurrent tests cannot trample
+    /// the env vars we're mutating.
     struct IssueLogGuard {
         log_file: PathBuf,
         prev_log: Option<std::ffi::OsString>,
         prev_quiet: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
     impl IssueLogGuard {
         fn new() -> Self {
+            let lock = crate::test_util::env_lock();
             let key = "JJ_WORKTREE_ISSUE_LOG";
             let qkey = "JJ_WORKTREE_ISSUE_QUIET";
             let prev_log = std::env::var_os(key);
@@ -572,6 +575,7 @@ mod tests {
                 log_file,
                 prev_log,
                 prev_quiet,
+                _lock: lock,
             }
         }
     }

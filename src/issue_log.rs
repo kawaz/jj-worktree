@@ -178,12 +178,12 @@ mod tests {
 
     #[test]
     fn log_path_uses_override_env() {
-        // SAFETY: tests run in serial within a single test binary process and
-        // restore the env var before returning.
+        // Hold the crate-wide env lock so concurrent tests don't trample
+        // JJ_WORKTREE_ISSUE_LOG while we mutate it here.
+        let _lock = crate::test_util::env_lock();
         let key = "JJ_WORKTREE_ISSUE_LOG";
         let prev = std::env::var_os(key);
-        // SAFETY: mutating env vars is unsafe in multi-threaded contexts; this
-        // single-threaded unit test ensures no concurrent access.
+        // SAFETY: env mutation is serialised by the lock above.
         unsafe { std::env::set_var(key, "/tmp/jj-worktree-test.log") };
         assert_eq!(
             log_path(),
@@ -200,6 +200,7 @@ mod tests {
 
     #[test]
     fn report_writes_jsonl_entry() {
+        let _lock = crate::test_util::env_lock();
         let dir = std::env::temp_dir().join(format!(
             "jj-worktree-issue-log-test-{}-{}",
             std::process::id(),

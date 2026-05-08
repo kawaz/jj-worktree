@@ -2,6 +2,8 @@ mod issue_log;
 mod jj;
 mod meta;
 mod shim;
+#[cfg(test)]
+mod test_util;
 mod worktree;
 
 use std::env;

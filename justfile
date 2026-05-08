@@ -8,9 +8,9 @@ default:
 build:
     cargo build --release
 
-# テスト (env var を共有するテストがあるため serial 実行)
+# テスト
 test:
-    cargo test -- --test-threads=1
+    cargo test
 
 # lint + format チェック
 check:
