@@ -4,32 +4,33 @@
 default:
     @just --list
 
+# format + lint (auto-fix 込み、残った警告はエラー)
+lint:
+    cargo fmt
+    cargo clippy --fix --allow-dirty --allow-staged --all-targets -- -D warnings
+
+# テスト (cargo test は内部で型チェック + ビルドも回るので Rust では lint → test で階層十分)
+test: lint
+    cargo test
+
+# release ビルド
+build: lint
+    cargo build --release
+
 # ビルドして実行
 run *ARGS: build
     ./target/release/jj-worktree {{ARGS}}
 
-# ビルド (release)
-build:
-    cargo build --release
-
-test:
-    cargo test
-
-check: lint fmt
-
-lint:
-    cargo clippy -- -D warnings
-
-fmt:
-    cargo fmt
-
-# push (check + test + check-translations を通してから push)
-push: check test check-translations
-    jj git push
-
-# ワーキングコピーがクリーン（empty）であることを確認
-ensure-clean:
+# ワーキングコピーがクリーン (empty change) であることを確認
+# `lint` を依存に取ることで、auto-fix で生じた変更を確実に検出する
+# (just は依存重複を排除するので lint は1回だけ走る)
+ensure-clean: lint
     test "$(jj log -r @ --no-graph -T 'empty')" = "true"
+
+# push (依存階層で lint/ensure-clean は重複排除されて1回ずつ実行)
+push: ensure-clean test check-translations
+    jj bookmark set main -r @-
+    jj git push
 
 # 翻訳ペア (*-ja.md / *.md) の整合性チェック
 # テンプレ: ~/.claude/rules/docs-structure.md の「check-translations の実装」セクション
@@ -67,7 +68,9 @@ check-translations: ensure-clean
     done < <(find . -name '*-ja.md' -not -path './.git/*' -not -path './.jj/*')
 
 # リリース (bump: major, minor, patch)
-release bump="patch": ensure-clean check test build
+# TODO (2026-05-09 以降): port-peeker 流に痩せさせる (release.yml の --generate-notes に CHANGELOG 一任)
+# 詳細: docs/findings/2026-05-08-release-workflow-research.md
+release bump="patch": ensure-clean test build
     #!/usr/bin/env bash
     set -euo pipefail
 

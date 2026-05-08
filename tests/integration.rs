@@ -30,7 +30,6 @@ fn require_jj_and_git() {
     }
     if Command::new("git").arg("--version").output().is_err() {
         eprintln!("SKIP: git not found");
-        return;
     }
 }
 
