@@ -67,44 +67,37 @@ check-translations: ensure-clean
             || die "ERROR: $ja was updated after $en. Update the English translation before pushing."
     done < <(find . -name '*-ja.md' -not -path './.git/*' -not -path './.jj/*')
 
-# リリース (bump: major, minor, patch)
-# TODO (2026-05-09 以降): port-peeker 流に痩せさせる (release.yml の --generate-notes に CHANGELOG 一任)
-# 詳細: docs/findings/2026-05-08-release-workflow-research.md
-release bump="patch": ensure-clean test build
+# Cargo.toml の version を bump して Release commit を push (CI が tag + GitHub Release を作成)
+# 詳細: docs/decisions/DR-0003-release-flow.md, docs/findings/2026-05-08-release-workflow-research.md
+bump-version bump="patch": ensure-clean test build
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Version bump
+    # Cargo.toml の version 変更が main に push されると release.yml が検出して
+    # tag (v$VERSION) と GitHub Releases (リリースノート --generate-notes 含む) を
+    # 自動作成する。tag を人が打つ必要はない。
+
     current=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
     IFS='.' read -r major minor patchv <<< "$current"
     case "{{bump}}" in
         major) major=$((major + 1)); minor=0; patchv=0 ;;
         minor) minor=$((minor + 1)); patchv=0 ;;
         patch) patchv=$((patchv + 1)) ;;
-        *) echo "Error: Invalid bump type '{{bump}}'" >&2; exit 1 ;;
+        *) echo "Error: invalid bump '{{bump}}'" >&2; exit 1 ;;
     esac
     new_version="${major}.${minor}.${patchv}"
-    sed -i '' "s/^version = \"${current}\"/version = \"${new_version}\"/" Cargo.toml
-    cargo check --quiet
     echo "Version: ${current} -> ${new_version}"
 
-    # CHANGELOG.md update via Claude (auto-generate from commit log)
-    latest_tag=$(gh release list --repo kawaz/jj-worktree --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
-    if [ -n "$latest_tag" ]; then
-        changes=$(jj log -r "$latest_tag..@-" --no-graph -T 'description ++ "\n"' 2>/dev/null || echo "")
-    else
-        changes=$(jj log -r '..@-' --no-graph -T 'description ++ "\n"' 2>/dev/null || echo "")
-    fi
-    claude -p "CHANGELOG.mdに v${new_version} ($(date +%Y-%m-%d)) のセクションを追加してください。以下のコミットログを元に、利用者視点で重要な順に記載: 新機能 / 動作変更(破壊的変更は特に明記) / バグ修正 / その他。内部リファクタやCI変更など利用者に影響しないものは省略可。コミットログ: ${changes}"
-
-    # Commit and push (GitHub Actions creates tag + release automatically)
+    # @ は空 change (ensure-clean で確認済)。Cargo.toml を書き換えて Release commit に
+    sed -i '' "s/^version = \"${current}\"/version = \"${new_version}\"/" Cargo.toml
+    cargo check --quiet  # Cargo.lock を新 version で更新
     jj describe -m "Release v${new_version}"
     jj new
-    jj bookmark set main -r @-
+
+    # push (release.yml がここから走る)
     just push
 
-    # Watch release workflow
+    # release.yml を watch
     sleep 3
-    run_id=$(gh run list --repo kawaz/jj-worktree --limit 1 --json databaseId -q '.[0].databaseId')
+    run_id=$(gh run list --repo kawaz/jj-worktree --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')
     gh run watch "$run_id" --repo kawaz/jj-worktree
- 
