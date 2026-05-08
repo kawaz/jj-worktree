@@ -7,6 +7,14 @@ const PROTECTED_WORKSPACES: &[&str] = &["default", "main"];
 /// `git worktree add` flags accepted as no-ops because their semantics do not
 /// apply to `jj workspace`. Keeping these silent (no AI-directed warning)
 /// prevents noise for routine calls. See DR-0001.
+///
+/// FUTURE (DR-0001): `--detach` is currently a no-op, but `git worktree add
+/// --detach <path> [<commit>]` semantically means "create the worktree at the
+/// given commit without setting up a branch". The natural jj counterpart is
+/// `jj new <commit>` inside the new workspace without `jj bookmark set`. If a
+/// caller relies on detached behaviour we may want to honour it; until then,
+/// the no-op is safe because jj already starts the workspace on a fresh empty
+/// change rooted at the specified commit-ish.
 const KNOWN_NO_VALUE_FLAGS: &[&str] = &[
     "--track",
     "--no-track",
@@ -19,6 +27,15 @@ const KNOWN_NO_VALUE_FLAGS: &[&str] = &[
 /// `git worktree add` flags that take a value, accepted as no-ops. The value
 /// is consumed alongside the flag.
 const KNOWN_VALUE_FLAGS: &[&str] = &["--reason"];
+
+/// Build the full argv we report to `issue_log` so that the JSONL entry
+/// matches the documented shape (`git worktree add ...`) regardless of which
+/// subcommand-tail slice the parser was handed. See DR-0002 sample.
+fn full_argv(tail: &[String]) -> Vec<String> {
+    let mut v = vec!["git".to_string(), "worktree".to_string(), "add".to_string()];
+    v.extend(tail.iter().cloned());
+    v
+}
 
 /// Parse workspace names from `jj workspace list` output.
 /// Each line format: "<wsname>: <change-id> <description>"
@@ -36,15 +53,20 @@ fn parse_workspace_names(ws_list_output: &str) -> Vec<String> {
         .collect()
 }
 
-/// Entry point called from main.rs. args[0] is the subcommand name.
-pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+/// Entry point called from main.rs and shim.rs. args[0] is the subcommand name.
+///
+/// `cwd` is the working directory used to locate the jj repository. When the
+/// shim is invoked as `git -C <path> worktree ...`, callers must pass `<path>`
+/// here so that the subcommands resolve the right `.jj` (and not the
+/// process-level current directory, which may be elsewhere).
+pub fn run(cwd: &Path, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
         return Err("no subcommand provided".into());
     }
     match args[0].as_str() {
-        "add" => cmd_add(&args[1..]),
-        "list" => cmd_list(&args[1..]),
-        "remove" => cmd_remove(&args[1..]),
+        "add" => cmd_add(cwd, &args[1..]),
+        "list" => cmd_list(cwd, &args[1..]),
+        "remove" => cmd_remove(cwd, &args[1..]),
         other => Err(format!("unknown worktree subcommand: {other}").into()),
     }
 }
@@ -89,18 +111,26 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, Box<dyn std::error::Error>
                         issue_log::IssueKind::UnknownOption,
                         "git worktree add",
                         Some(opt_name),
-                        args,
+                        &full_argv(args),
                     );
                 }
             }
             a if a.starts_with('-') => {
                 // Unknown bare flag: accept as no-op (do not consume next arg
                 // because we cannot tell if it is a value or a positional).
+                // Hint the caller toward `--xxx=val` form so a value, if any,
+                // does not get silently consumed as a path/commit-ish.
+                eprintln!(
+                    "hint: jj-worktree treats `{a}` as a single flag and does \
+                     not consume the next argument as a value. If `{a}` should \
+                     take a value, pass it as `{a}=<value>` to keep positional \
+                     arguments intact."
+                );
                 issue_log::report(
                     issue_log::IssueKind::UnknownOption,
                     "git worktree add",
                     Some(a),
-                    args,
+                    &full_argv(args),
                 );
             }
             _ => {
@@ -125,11 +155,10 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, Box<dyn std::error::Error>
 }
 
 /// `jj-worktree add <path> [-b <branch>] [<commit-ish>]`
-fn cmd_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_add(cwd: &Path, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let parsed = parse_add_args(args)?;
-    let cwd = std::env::current_dir()?;
     let repo_root =
-        jj::find_repo_root(&cwd).ok_or("not inside a jj repository (no .jj directory found)")?;
+        jj::find_repo_root(cwd).ok_or("not inside a jj repository (no .jj directory found)")?;
 
     // Workspace name is the last component of the path
     let ws_path = Path::new(&parsed.path);
@@ -205,15 +234,14 @@ fn cmd_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// `jj-worktree list`
-fn cmd_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_list(cwd: &Path, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Check for --help but otherwise no args expected
     if args.iter().any(|a| a.starts_with('-') && a != "--") {
         return Err("list takes no options".into());
     }
 
-    let cwd = std::env::current_dir()?;
     let repo_root =
-        jj::find_repo_root(&cwd).ok_or("not inside a jj repository (no .jj directory found)")?;
+        jj::find_repo_root(cwd).ok_or("not inside a jj repository (no .jj directory found)")?;
 
     // Get workspace list from jj
     let ws_list_output = jj::run_stdout(Some(&repo_root), &["workspace", "list"])?;
@@ -233,18 +261,21 @@ fn cmd_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         // First try to find it via metadata, then fall back to jj root
         let ws_path = get_workspace_path(&repo_root, ws_name)?;
 
-        // Get commit info: commit_id short + bookmarks
+        // Get commit info: commit_id short + bookmarks.
+        // Note: pass `<ws_name>@` as a bare argument — jj receives argv directly
+        // (no shell interpretation), so wrapping it in single quotes would be
+        // taken as a literal `'<ws_name>@'` and revision lookup would fail.
+        // `--workspace` is not a flag on `jj log`; the workspace is selected by
+        // the `<ws>@` revset itself.
         let commit_info = jj::run_stdout(
             Some(&repo_root),
             &[
                 "log",
                 "-r",
-                &format!("'{ws_name}@'"),
+                &format!("{ws_name}@"),
                 "--no-graph",
                 "-T",
                 r#"commit_id.short(7) ++ " " ++ local_bookmarks.map(|b| b.name()).join(",")"#,
-                "--workspace",
-                ws_name,
             ],
         )
         .unwrap_or_default();
@@ -309,7 +340,7 @@ fn get_workspace_path(
 }
 
 /// `jj-worktree remove [--force] <path>`
-fn cmd_remove(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_remove(cwd: &Path, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut force = false;
     let mut path: Option<String> = None;
 
@@ -329,12 +360,11 @@ fn cmd_remove(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let path_str = path.ok_or("missing required argument: <path>")?;
-    let cwd = std::env::current_dir()?;
     let repo_root =
-        jj::find_repo_root(&cwd).ok_or("not inside a jj repository (no .jj directory found)")?;
+        jj::find_repo_root(cwd).ok_or("not inside a jj repository (no .jj directory found)")?;
 
     // 1. Resolve to canonical path
-    let target_path = resolve_path(&cwd, &path_str)?;
+    let target_path = resolve_path(cwd, &path_str)?;
 
     // 5. Verify the path is under the jj repo root
     let canonical_repo_root = repo_root
@@ -362,22 +392,24 @@ fn cmd_remove(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // 3. Load metadata for bookmark info
     let ws_meta = meta::load(&repo_root, &ws_name)?;
 
-    // Check for uncommitted changes (unless --force)
+    // Check for uncommitted changes (unless --force).
+    // Use `jj log -T empty` rather than `jj diff --stat` because diff --stat
+    // always prints a "0 files changed, …" summary line even for empty
+    // changes, which is a non-empty string and would falsely block removal.
     if !force {
-        // Check if workspace has modifications by examining jj status
-        let status_output = jj::run_stdout(
+        let empty_check = jj::run_stdout(
             Some(&repo_root),
             &[
-                "diff",
+                "log",
                 "-r",
-                &format!("'{ws_name}@'"),
-                "--stat",
-                "--workspace",
-                &ws_name,
+                &format!("{ws_name}@"),
+                "--no-graph",
+                "-T",
+                "empty",
             ],
         );
-        if let Ok(ref status) = status_output
-            && !status.trim().is_empty()
+        if let Ok(ref s) = empty_check
+            && s.trim() != "true"
         {
             return Err(format!(
                 "workspace '{}' has uncommitted changes. Use --force to remove anyway.",

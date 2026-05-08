@@ -175,11 +175,7 @@ fn shim_c_option_worktree_list() {
 
     // Run `git -C <repo_root> worktree list` from the main workspace.
     // The -C flag directs jj repo detection to repo_root (which has .jj),
-    // while the worktree command internally also uses cwd for its operations.
-    // Note: worktree::run uses env::current_dir() internally, so we still
-    // need to be inside a jj directory for the command to work.
-    // This test verifies that -C is parsed correctly and the shim routes
-    // to jj-worktree instead of real git.
+    // and the worktree subcommand uses the same start_dir for its operations.
     run_git_shim(
         &main_ws,
         &["-C", repo_root.to_str().unwrap(), "worktree", "list"],
@@ -187,6 +183,33 @@ fn shim_c_option_worktree_list() {
     )
     .success()
     .stdout(predicate::str::contains("test-ws"));
+}
+
+// Regression test for: `git -C <path> worktree list` invoked from outside any
+// .jj directory. Earlier versions forwarded the -C path only for jj-repo
+// detection but ran the worktree subcommand with `current_dir()`, which would
+// fail with "not inside a jj repository" when the cwd was outside any jj tree.
+#[test]
+fn shim_c_option_from_outside_jj() {
+    require_jj_and_git();
+
+    let (_tmp, repo_root, _main_ws) = setup_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    // A directory with no .jj anywhere up the tree.
+    let outside = TempDir::new().unwrap();
+    let outside_path = outside.path().canonicalize().unwrap();
+
+    run_jj_worktree(&repo_root, &["add", "test-ws-outside"]).success();
+
+    run_git_shim(
+        &outside_path,
+        &["-C", repo_root.to_str().unwrap(), "worktree", "list"],
+        &shim_path,
+    )
+    .success()
+    .stdout(predicate::str::contains("test-ws-outside"));
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +344,20 @@ fn list_shows_workspaces_in_git_worktree_format() {
     assert!(
         stdout.contains(&repo_root.to_string_lossy().to_string()) || stdout.contains("/private"),
         "list output should contain absolute paths, got: {}",
+        stdout
+    );
+
+    // Regression: each line should contain a 7-char hex commit prefix between
+    // the path and the bookmark/workspace name. Earlier versions wrapped the
+    // jj revision argument in literal single quotes, which made the lookup
+    // fail and silently fall back to an empty commit field.
+    let has_short_hash = stdout.lines().any(|line| {
+        line.split_whitespace()
+            .any(|tok| tok.len() == 7 && tok.chars().all(|c| c.is_ascii_hexdigit()))
+    });
+    assert!(
+        has_short_hash,
+        "list output should contain a 7-char hex commit prefix per workspace, got: {}",
         stdout
     );
 }
@@ -659,4 +696,41 @@ fn remove_via_shim_worktree_remove() {
     .success();
 
     assert!(!ws_dir.exists());
+}
+
+// Regression test for cmd_status mapping. jj reports added files as
+// "A path", which shim must translate to git porcelain v1 "A  path"
+// (staged add — two-char status field XY). Earlier versions emitted
+// "?? path" (untracked), which broke consumers like Claude Code that
+// distinguish staged vs untracked changes.
+#[test]
+fn shim_status_maps_added_to_staged_add() {
+    require_jj_and_git();
+
+    let (_tmp, _repo_root, main_ws) = setup_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    // Create a new file in the main workspace; jj auto-snapshots it as
+    // an addition relative to the parent change.
+    let added_file = main_ws.join("new-file.txt");
+    std::fs::write(&added_file, "hello\n").expect("write new-file");
+
+    let result = run_git_shim(&main_ws, &["status", "--porcelain"], &shim_path).success();
+    let stdout = String::from_utf8_lossy(&result.get_output().stdout);
+
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("A  ") && l.contains("new-file.txt")),
+        "expected staged-add line `A  new-file.txt` in porcelain output, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout
+            .lines()
+            .any(|l| l.starts_with("??") && l.contains("new-file.txt")),
+        "added file must not be reported as untracked (??), got:\n{}",
+        stdout
+    );
 }

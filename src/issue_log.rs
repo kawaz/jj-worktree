@@ -79,29 +79,87 @@ fn parent_pid() -> u32 {
 
 /// Best-effort retrieval of the parent process command line.
 ///
-/// Linux: read `/proc/<ppid>/cmdline` (NUL-separated argv).
-/// macOS / others: shell out to `ps -p <ppid> -o command=`.
-/// Returns an empty string when the lookup fails.
+/// Privacy: the parent's full argv may contain secrets passed as CLI flags
+/// (API tokens, passwords, internal AI prompts, etc.). To avoid persisting
+/// those, callers must opt in via `JJ_WORKTREE_ISSUE_INCLUDE_CMDLINE=1`.
+/// When the env var is unset (the default), only the parent process basename
+/// (`comm`) is captured.
+///
+/// Lookup paths:
+/// - Linux: read `/proc/<ppid>/cmdline` (full argv) or `/proc/<ppid>/comm`
+///   (basename only).
+/// - macOS / others: shell out to `ps -p <ppid> -o command=` (full) or
+///   `ps -p <ppid> -o comm=` (basename). The `ps` invocation has a hard
+///   timeout to prevent the shim from hanging on a misbehaving system.
+///
+/// Returns an empty string on any failure or unsupported platform.
 fn caller_cmdline(ppid: u32) -> String {
     if ppid == 0 {
         return String::new();
     }
-    if let Ok(content) = fs::read(format!("/proc/{ppid}/cmdline"))
+    let include_full = std::env::var("JJ_WORKTREE_ISSUE_INCLUDE_CMDLINE").as_deref() == Ok("1");
+
+    // Linux: read from /proc.
+    let proc_path = if include_full {
+        format!("/proc/{ppid}/cmdline")
+    } else {
+        format!("/proc/{ppid}/comm")
+    };
+    if let Ok(content) = fs::read(&proc_path)
         && !content.is_empty()
     {
-        return content
-            .split(|b| *b == 0)
-            .filter(|s| !s.is_empty())
-            .map(|s| String::from_utf8_lossy(s).to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let s = if include_full {
+            // /proc/<pid>/cmdline is NUL-separated; rejoin with spaces.
+            content
+                .split(|b| *b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s).to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            String::from_utf8_lossy(&content).trim().to_string()
+        };
+        return s;
     }
-    if let Ok(out) = std::process::Command::new("ps")
-        .args(["-p", &ppid.to_string(), "-o", "command="])
-        .output()
-        && out.status.success()
+
+    // macOS / BSD: shell out to ps with a timeout so a stuck environment
+    // cannot deadlock the shim. We rely on `Command::output` returning
+    // promptly under normal conditions; the deadline is enforced via a
+    // thread + try_wait loop because the standard library lacks a built-in.
+    let ps_field = if include_full { "command=" } else { "comm=" };
+    if let Ok(mut child) = std::process::Command::new("ps")
+        .args(["-p", &ppid.to_string(), "-o", ps_field])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
     {
-        return String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // Poll up to ~200ms for the child to exit. ps should respond in <10ms
+        // in practice; anything slower means the system is misbehaving and we
+        // prefer an empty result over blocking the shim.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => {
+                    let mut out = String::new();
+                    if let Some(mut stdout) = child.stdout.take() {
+                        use std::io::Read;
+                        let _ = stdout.read_to_string(&mut out);
+                    }
+                    return out.trim().to_string();
+                }
+                Ok(Some(_)) => return String::new(),
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return String::new();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => return String::new(),
+            }
+        }
     }
     String::new()
 }
@@ -133,10 +191,24 @@ pub fn report(kind: IssueKind, cmd: &str, option: Option<&str>, argv: &[String])
         "caller_cmdline": cmdline,
     });
 
+    // The directory and log file may carry caller_cmdline (when opt-in) or
+    // argv values that are sensitive. Restrict to user-only permissions.
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+        }
     }
-    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+    let mut open_opts = fs::OpenOptions::new();
+    open_opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_opts.mode(0o600);
+    }
+    if let Ok(mut f) = open_opts.open(&path) {
         let _ = writeln!(f, "{entry}");
     }
 
@@ -149,15 +221,14 @@ pub fn report(kind: IssueKind, cmd: &str, option: Option<&str>, argv: &[String])
     eprintln!(
         "warning: {label}{suffix} (accepted as no-op)\n\
 \n\
-This option is not yet known by jj-worktree.\n\
-The incident has been logged to {}\n\
+This option is not yet known by jj-worktree, but the operation continued.\n\
+If you intended this option to take effect, the result is likely NOT what\n\
+you expected. The incident has been logged to {}\n\
 \n\
-[For AI agents] Please report this issue to the jj-worktree project before\n\
-falling back to another approach. Add a brief note in:\n\
-  $HOME/.local/share/repos/github.com/kawaz/jj-worktree/main/docs/issue/\n\
-\n\
-File name format: YYYY-MM-DD-{{short-slug}}.md\n\
-Include: the option/error, the calling context, and what you tried to do.",
+[For AI agents] Please surface this to the human user (do not silently\n\
+fall back to a different approach). To report it upstream, open an issue at\n\
+  https://github.com/kawaz/jj-worktree/issues/new\n\
+including: the option/error, the calling context, and what you tried to do.",
         path.display()
     );
 }

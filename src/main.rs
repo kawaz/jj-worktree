@@ -202,7 +202,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     return Ok(());
                 }
                 "add" | "list" | "remove" => {
-                    worktree::run(&args)?;
+                    let cwd = env::current_dir()?;
+                    worktree::run(&cwd, &args)?;
                 }
                 "run" => {
                     cmd_run(&args[1..])?;

@@ -240,9 +240,12 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     match (subcmd.as_str(), &repo_root) {
         ("worktree", Some(_root)) => {
-            // Redirect to jj-worktree's worktree module
+            // Redirect to jj-worktree's worktree module.
+            // Pass `start_dir` (which honours `git -C <path>`) so that the
+            // worktree subcommands resolve `.jj` relative to that path rather
+            // than the process-level current directory.
             let worktree_args: Vec<String> = args[subcmd_index + 1..].to_vec();
-            crate::worktree::run(&worktree_args)
+            crate::worktree::run(&start_dir, &worktree_args)
         }
         ("branch", Some(root)) => {
             // Check for `branch -d <name>` pattern
@@ -353,7 +356,14 @@ fn cmd_status(
             }
             // Convert jj diff --summary format to git porcelain v1.
             // jj: "M file.txt", "A file.txt", "D file.txt", "R {from} {to}"
-            // git porcelain v1: " M file.txt", "A  file.txt", " D file.txt", "R  from -> to"
+            // git porcelain v1 (XY format, X=index, Y=worktree):
+            //   " M file.txt"  (modified, unstaged)
+            //   "A  file.txt"  (added, staged) — jj has no index, but jj `A` is a
+            //                   tracked addition, which maps to git's staged add.
+            //                   "?? file.txt" would mean untracked, which is wrong.
+            //   " D file.txt"  (deleted)
+            //   "R  from -> to" (renamed). jj reports just the new path; emit as
+            //                   modified to keep the line shape simple.
             for line in diff.lines() {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
@@ -362,7 +372,7 @@ fn cmd_status(
                 if let Some((status, path)) = trimmed.split_once(' ') {
                     match status {
                         "M" => println!(" M {path}"),
-                        "A" => println!("?? {path}"),
+                        "A" => println!("A  {path}"),
                         "D" => println!(" D {path}"),
                         "R" => {
                             // jj format: "R {from} {to}" — just report as modified
