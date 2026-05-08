@@ -89,7 +89,9 @@ bump-version bump="patch": ensure-clean test build
     echo "Version: ${current} -> ${new_version}"
 
     # @ は空 change (ensure-clean で確認済)。Cargo.toml を書き換えて Release commit に
-    sed -i '' "s/^version = \"${current}\"/version = \"${new_version}\"/" Cargo.toml
+    # sed の -i は BSD と GNU で構文が違う。`-i.bak` ＋ rm で両 OS 互換にする。
+    sed -i.bak "s/^version = \"${current}\"/version = \"${new_version}\"/" Cargo.toml
+    rm -f Cargo.toml.bak
     cargo check --quiet  # Cargo.lock を新 version で更新
     jj describe -m "Release v${new_version}"
     jj new
