@@ -137,14 +137,11 @@ A が最もミニマル。kawaz の他リポジトリで CHANGELOG.md を維持�
 | `~/.local/share/repos/github.com/kawaz/jj-worktree/main/.github/workflows/release.yml` | 既に良い形 (変更不要、255行) |
 | `~/.local/share/repos/github.com/kawaz/jj-worktree/main/justfile` | port-peeker 流に痩せさせる対象 |
 
-### 明日の作業候補
+### 追記 (2026-05-09): 結論
 
-1. **port-peeker の release.yml と justfile を Read で読む** (どこまで痩せているか確認)
-2. **CHANGELOG.md の扱いを決定** (A/B/C のどれか)
-3. **jj-worktree の justfile から `release` ターゲットを `bump-version` に置き換え**
-4. **CHANGELOG.md を選んだ方針に従って整理** (削除 / 別レシピ化 / autocommit)
-5. **DR-0003 として「リリースフロー: bump-version + release.yml on Cargo.toml change」を記録**
-6. **共通 justfile (check-translations) のパス問題を解決** — docs-structure.md 側でルール固めてから
+本調査を踏まえ、リリースフローの方針は **DR-0003 (Cargo.toml 変化検知 → tag 自動生成 + GitHub Release)** として確定した。CHANGELOG.md は削除し `gh release create --generate-notes` に一任、`justfile::release` は port-peeker 流の `bump-version` に痩せさせた。詳細は `docs/decisions/DR-0003-release-flow.md` を参照。
+
+共通 justfile (check-translations) のパス問題は、docs-structure ルールを「`README.md` だけリポジトリ直下、`DESIGN.md` 等は `docs/` 配下」に確定したうえで、`find . -name '*-ja.md'` ベースの言語非依存テンプレに置き換え済 (詳細は `docs/findings/2026-05-09-justfile-template-research.md`)。
 
 ### サブエージェント呼び出し記録
 

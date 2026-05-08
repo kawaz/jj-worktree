@@ -4,11 +4,11 @@ kawaz/* リポジトリ群 (約205) の justfile / .github/workflows / hooks を
 
 ## 判明した事実
 
-### 真髄 (一行で)
+### 中核となる設計原理
 
-> **順序保証問題を依存トポロジーで構造的に消し、auto-fix で生じた変更は `ensure-clean: lint` 依存で捕捉する。**
+> 順序保証問題を依存トポロジーで構造的に消し、auto-fix で生じた変更は `ensure-clean: lint` 依存で捕捉する。
 
-これが claude-statusline (2026-04-22) で結晶化した justfile 設計の頂点。それ以前の議論 (`justfile` 化, レシピ分解, `--deny-warn`, disable 拒否, test 内包の依存階層) は全てこの核へ収斂している。port-peeker (2026-05-06) や claude-pr-monitor バックポート (2026-04-23) は、この核を**他リポへ横展開する作業**。
+claude-statusline (2026-04-22) で確立されたパターン。それ以前の議論 (`justfile` 化, レシピ分解, `--deny-warn`, disable 拒否, test 内包の依存階層) はこの設計に収斂する形で展開された。port-peeker (2026-05-06) や claude-pr-monitor バックポート (2026-04-23) では、このパターンを他リポへ展開する作業が行われた。
 
 ### 共通化できるレシピ (横展開済み or 候補)
 
@@ -22,9 +22,9 @@ kawaz/* リポジトリ群 (約205) の justfile / .github/workflows / hooks を
 | `check-translations` | jj-worktree 版 (find ベース、jj/git 両対応 file_ts、`grep -qF` 固定文字列) | 共通テンプレに昇華済 (`~/.claude/rules/docs-structure.md`) |
 | `lint` | `cargo fmt + cargo clippy --fix --allow-dirty --allow-staged` (Rust)、`bunx oxfmt + oxlint --fix` (TS) | 言語別 |
 
-#### `ensure-clean: lint` の依存トリック
+#### `ensure-clean: lint` の依存パターン
 
-jj-worktree が最初に思いついた可能性が高い工夫。
+jj-worktree (2026-05-09) で最初に採用された依存設計。
 
 ```
 push -> ensure-clean -> lint
@@ -119,13 +119,13 @@ template-rust / authsock-warden / provide-defer の3件。jj は git pre-commit 
 7. **release watch のデフォルト化**: port-peeker が release.yml を `gh run watch` で自動監視 (`gh run list --workflow=release.yml --limit 1`)
 8. **shellcheck の動的ファイル列挙** (claude-pr-monitor): `git ls-files 'scripts/*.sh' 'hooks/*.sh'` で plugin リポの再利用テンプレに
 
-### 連携で「光ってる」リポ TOP 5
+### 連携が網羅的なリポジトリ (参考実装 5件)
 
 1. **claude-cmux-msg**: `just push` に `check-bundle` → `check-versions` → `check-version-bump` → `check-translations` → `validate` を全部チェイン。push 後は marketplace と plugin の両方を `claude plugin update` で自己更新
-2. **jj-worktree**: `ensure-clean: lint` の依存順序トリック、`check-translations` の find ベース動的発見版、`file_ts()` の jj/git 自動切替。kawaz 流テンプレの最新到達点
-3. **port-peeker**: 最小化された理想形。release.yml 110 行で「VERSION 変化 → semver 検証 → 既タグ skip → matrix build → `--generate-notes`」完結
-4. **claude-statusline**: シンプル分担の極致。CI は `just` 1 行、`default: test → typecheck: lint` で1コマンド全実行、Claude PostToolUse hook も同じ `just` を再利用
-5. **authsock-warden**: Cask/Formula 切替 (DR-013)、.app バンドル + 署名 + notarize + staple の完全自動化、lefthook + Claude hook の両方装備
+2. **jj-worktree**: `ensure-clean: lint` の依存パターン、`check-translations` の find ベース動的発見、`file_ts()` の jj/git 自動切替を採用 (2026-05-09 時点での参考)
+3. **port-peeker**: release.yml 110 行で「VERSION 変化 → semver 検証 → 既タグ skip → matrix build → `--generate-notes`」を完結
+4. **claude-statusline**: CI は `just` 1 行、`default: test → typecheck: lint` で1コマンド全実行、Claude PostToolUse hook も同じ `just` を再利用 (CI とエディタ内チェックの完全一致)
+5. **authsock-warden**: Cask/Formula 切替 (DR-013)、.app バンドル + 署名 + notarize + staple の自動化、lefthook + Claude hook を併用
 
 ## 実用的な示唆 / ベストプラクティス
 
@@ -202,7 +202,7 @@ check-translations: ensure-clean
 ### 関連ファイル (絶対パス)
 
 主要参考実装:
-- `/Users/kawaz/.local/share/repos/github.com/kawaz/jj-worktree/main/justfile` (kawaz 流テンプレの最新到達点)
+- `/Users/kawaz/.local/share/repos/github.com/kawaz/jj-worktree/main/justfile` (2026-05-09 時点の参考実装)
 - `/Users/kawaz/.local/share/repos/github.com/kawaz/port-peeker/main/justfile` + `release.yml` (最小骨格)
 - `/Users/kawaz/.local/share/repos/github.com/kawaz/claude-statusline/main/justfile` + `.claude/settings.json` (CI 一発型)
 - `/Users/kawaz/.local/share/repos/github.com/kawaz/claude-cmux-msg/main/justfile` + `hooks/hooks.json` (総合)
