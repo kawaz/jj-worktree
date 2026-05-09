@@ -21,6 +21,5 @@ jobs:
           cargo install jj-cli --locked
           jj --version
 
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - uses: extractions/setup-just@v3
+      - run: just ci

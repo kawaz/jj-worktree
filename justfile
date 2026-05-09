@@ -21,6 +21,10 @@ build: lint
 run *ARGS: build
     ./target/release/jj-worktree {{ARGS}}
 
+# CI で呼ぶ単一エントリ (lint→test→build を依存重複排除で1回ずつ)
+# CI workflow は `just ci` 1行に集約され、言語差は justfile 側に吸収する
+ci: lint test build
+
 # ワーキングコピーがクリーン (empty change) であることを確認
 # `lint` を依存に取ることで、auto-fix で生じた変更を確実に検出する
 # (just は依存重複を排除するので lint は1回だけ走る)
@@ -68,8 +72,9 @@ check-translations: ensure-clean
     done < <(find . -name '*-ja.md' -not -path './.git/*' -not -path './.jj/*')
 
 # Cargo.toml の version を bump して Release commit を push (CI が tag + GitHub Release を作成)
+# レシピ名は呼び出すツール名と揃えて `bump-semver` に統一 (kawaz リポ全体で同じパターン)
 # 詳細: docs/decisions/DR-0003-release-flow.md, docs/findings/2026-05-08-release-workflow-research.md
-bump-version bump="patch": ensure-clean test build
+bump-semver bump="patch": ensure-clean test build
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -77,21 +82,10 @@ bump-version bump="patch": ensure-clean test build
     # tag (v$VERSION) と GitHub Releases (リリースノート --generate-notes 含む) を
     # 自動作成する。tag を人が打つ必要はない。
 
-    current=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-    IFS='.' read -r major minor patchv <<< "$current"
-    case "{{bump}}" in
-        major) major=$((major + 1)); minor=0; patchv=0 ;;
-        minor) minor=$((minor + 1)); patchv=0 ;;
-        patch) patchv=$((patchv + 1)) ;;
-        *) echo "Error: invalid bump '{{bump}}'" >&2; exit 1 ;;
-    esac
-    new_version="${major}.${minor}.${patchv}"
-    echo "Version: ${current} -> ${new_version}"
-
-    # @ は空 change (ensure-clean で確認済)。Cargo.toml を書き換えて Release commit に
-    # sed の -i は BSD と GNU で構文が違う。`-i.bak` ＋ rm で両 OS 互換にする。
-    sed -i.bak "s/^version = \"${current}\"/version = \"${new_version}\"/" Cargo.toml
-    rm -f Cargo.toml.bak
+    # @ は空 change (ensure-clean で確認済)。bump-semver が Cargo.toml の
+    # [package].version を basename 自動判定で読み書きし、新バージョンを stdout に返す。
+    new_version=$(bump-semver "{{bump}}" Cargo.toml --write)
+    echo "Version: -> ${new_version}"
     cargo check --quiet  # Cargo.lock を新 version で更新
     jj describe -m "Release v${new_version}"
     jj new
