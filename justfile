@@ -73,8 +73,9 @@ check-translations: ensure-clean
 
 # Cargo.toml の version を bump して Release commit を push (CI が tag + GitHub Release を作成)
 # レシピ名は呼び出すツール名と揃えて `bump-semver` に統一 (kawaz リポ全体で同じパターン)
+# 引数名は `level` (semver bump level の慣用 + claude-cmux-msg 等の他リポと整合)
 # 詳細: docs/decisions/DR-0003-release-flow.md, docs/findings/2026-05-08-release-workflow-research.md
-bump-semver bump="patch": ensure-clean test build
+bump-semver level="patch": ensure-clean test build
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -84,7 +85,7 @@ bump-semver bump="patch": ensure-clean test build
 
     # @ は空 change (ensure-clean で確認済)。bump-semver が Cargo.toml の
     # [package].version を basename 自動判定で読み書きし、新バージョンを stdout に返す。
-    new_version=$(bump-semver "{{bump}}" Cargo.toml --write)
+    new_version=$(bump-semver "{{level}}" Cargo.toml --write)
     echo "Version: -> ${new_version}"
     cargo check --quiet  # Cargo.lock を新 version で更新
     jj describe -m "Release v${new_version}"
