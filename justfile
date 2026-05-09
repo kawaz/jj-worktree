@@ -76,25 +76,10 @@ check-translations: ensure-clean
 # 引数名は `level` (semver bump level の慣用 + claude-cmux-msg 等の他リポと整合)
 # 詳細: docs/decisions/DR-0003-release-flow.md, docs/findings/2026-05-08-release-workflow-research.md
 bump-semver level="patch": ensure-clean test build
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    # Cargo.toml の version 変更が main に push されると release.yml が検出して
-    # tag (v$VERSION) と GitHub Releases (リリースノート --generate-notes 含む) を
-    # 自動作成する。tag を人が打つ必要はない。
-
-    # @ は空 change (ensure-clean で確認済)。bump-semver が Cargo.toml の
-    # [package].version を basename 自動判定で読み書きし、新バージョンを stdout に返す。
-    new_version=$(bump-semver "{{level}}" Cargo.toml --write)
-    echo "Version: -> ${new_version}"
-    cargo check --quiet  # Cargo.lock を新 version で更新
-    jj describe -m "Release v${new_version}"
+    bump-semver "{{level}}" Cargo.toml --write
+    cargo check --quiet
+    jj describe -m "Release v$(bump-semver get Cargo.toml)"
     jj new
-
-    # push (release.yml がここから走る)
     just push
-
-    # release.yml を watch
     sleep 3
-    run_id=$(gh run list --repo kawaz/jj-worktree --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')
-    gh run watch "$run_id" --repo kawaz/jj-worktree
+    gh run watch "$(gh run list --repo kawaz/jj-worktree --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')" --repo kawaz/jj-worktree
