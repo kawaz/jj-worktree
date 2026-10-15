@@ -7,3 +7,4 @@
 | [DR-0001](./DR-0001-lenient-unknown-options.md) | 未知の `git worktree` オプションは寛容に pass-through する | Accepted |
 | [DR-0002](./DR-0002-self-reporting-mechanism.md) | 想定外オプション/エラー時の自己報告メカニズム (DR-0001 を補完) | Accepted |
 | [DR-0003](./DR-0003-release-flow.md) | リリースフロー (Cargo.toml 変化検知 → tag 自動生成 + GitHub Release) | Accepted |
+| [DR-0004](./DR-0004-passthrough-untranslatable-worktree.md) | 翻訳できない `git worktree` 呼び出しは real git へ pass-through する (drop-in 契約 + prune 時 forgotten workspace reap) | Proposed |

@@ -734,3 +734,726 @@ fn shim_status_maps_added_to_staged_add() {
         stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// 9. drop-in pass-through: untranslatable worktree operations reach real git
+// ---------------------------------------------------------------------------
+
+/// The shim's contract is to be a drop-in `git`: only the worktree operations
+/// it can fully honor are translated, everything else reaches real git. A
+/// colocated workspace *is* a real git worktree, so real git's answer is
+/// correct where the shim's translation would be a lossy no-op or an error.
+///
+/// Regression: `list --porcelain` (used by git clients to enumerate
+/// worktrees) used to fail with "list takes no options". The passthrough must
+/// also be complete: `jj workspace add` registers a git worktree even in the
+/// bare-backed non-colocated layout (jj ≥0.46 creates the worktree admin
+/// record for every workspace), so the porcelain output has to name the
+/// added workspace, not just the repository's own line.
+#[test]
+fn shim_worktree_list_porcelain_passthrough() {
+    require_jj_and_git();
+
+    let (_tmp, repo_root, _main_ws) = setup_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    run_jj_worktree(&repo_root, &["add", "porcelain-ws"]).success();
+
+    run_git_shim(&repo_root, &["worktree", "list", "--porcelain"], &shim_path)
+        .success()
+        .stdout(
+            predicate::str::contains("worktree ").and(predicate::str::contains("porcelain-ws")),
+        );
+}
+
+/// Regression: unhandled worktree subcommands used to die with
+/// "unknown worktree subcommand". They must reach real git instead, so the
+/// caller sees git's own error for its own mistake.
+#[test]
+fn shim_worktree_unhandled_subcommand_passthrough() {
+    require_jj_and_git();
+
+    let (_tmp, repo_root, _main_ws) = setup_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    // `git worktree lock` on a path that is not a worktree: real git rejects
+    // it with its own message. The shim must not intercept it.
+    run_git_shim(
+        &repo_root,
+        &["worktree", "lock", "not-a-worktree"],
+        &shim_path,
+    )
+    .failure()
+    .stderr(predicate::str::contains("is not a working tree"))
+    .stderr(predicate::str::contains("unknown worktree subcommand").not());
+}
+
+/// `--orphan` has no jj equivalent: translating it would produce a jj
+/// workspace where the caller asked for a git-native orphan worktree. The
+/// whole call passes through to real git, so the result is a real git
+/// worktree that jj does not track as a workspace.
+#[test]
+fn shim_worktree_add_orphan_passthrough() {
+    require_jj_and_git();
+
+    let (_tmp, repo_root, _main_ws) = setup_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    // The exact call shape jj itself uses for colocated workspaces.
+    run_git_shim(
+        &repo_root,
+        &[
+            "worktree",
+            "add",
+            "--orphan",
+            "-b",
+            "orphan-branch",
+            "orphan-ws",
+        ],
+        &shim_path,
+    )
+    .success();
+
+    // Real git made a git worktree (with its own .git file), not a jj workspace.
+    let ws_dir = repo_root.join("orphan-ws");
+    assert!(ws_dir.exists(), "git worktree directory should exist");
+    assert!(
+        ws_dir.join(".git").is_file(),
+        "orphan worktree should be a real git worktree (.git file), not a jj workspace"
+    );
+
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("orphan-ws"),
+        "jj must not track the git-native orphan workspace, got: {}",
+        stdout
+    );
+}
+
+/// Git also accepts `-d` as the short form of `--detach`. The short form must
+/// be excluded from translation just like the long form, or `parse_add_args`
+/// would treat it as an unknown no-op and create a jj workspace where the
+/// caller asked for a detached git worktree.
+#[test]
+fn shim_worktree_add_detach_short_passthrough() {
+    require_jj_and_git();
+
+    let (_tmp, root) = setup_colocated_jj_repo();
+    // A freshly initialized colocated repo has an unborn git HEAD; real git
+    // needs a commit to detach at.
+    let initial = Command::new("jj")
+        .args(["new"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        initial.status.success(),
+        "jj new failed: {}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    run_git_shim(&root, &["worktree", "add", "-d", "detached-ws"], &shim_path).success();
+
+    // Real git made a git worktree, not a jj workspace.
+    let ws_dir = root.join("detached-ws");
+    assert!(ws_dir.exists(), "git worktree directory should exist");
+    assert!(
+        ws_dir.join(".git").is_file(),
+        "detached worktree should be a real git worktree (.git file), not a jj workspace"
+    );
+
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("detached-ws"),
+        "jj must not track the detached git worktree as a workspace, got: {}",
+        stdout
+    );
+}
+
+/// `remove` must translate only registered jj workspaces. A git-native
+/// worktree (created via the `add --orphan` passthrough) is unknown to jj;
+/// translating its removal fails with "no workspace found for path" and
+/// leaves the worktree behind, so it must reach real git instead.
+#[test]
+fn shim_worktree_remove_git_native_passthrough() {
+    require_jj_and_git();
+
+    let (_tmp, root) = setup_colocated_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    run_git_shim(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "--orphan",
+            "-b",
+            "orphan-branch",
+            "orphan-ws",
+        ],
+        &shim_path,
+    )
+    .success();
+
+    run_git_shim(
+        &root,
+        &["worktree", "remove", "--force", "orphan-ws"],
+        &shim_path,
+    )
+    .success();
+
+    assert!(
+        !root.join("orphan-ws").exists(),
+        "git-native worktree should be removed by real git"
+    );
+}
+
+/// `-f` is git's short form of `--force`; a translated `remove -f` must not
+/// fail with "unknown option" where real git would succeed.
+#[test]
+fn shim_worktree_remove_short_force_translates() {
+    require_jj_and_git();
+
+    let (_tmp, repo_root, _main_ws) = setup_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    run_jj_worktree(&repo_root, &["add", "forced-ws"]).success();
+
+    run_git_shim(
+        &repo_root,
+        &["worktree", "remove", "-f", "forced-ws"],
+        &shim_path,
+    )
+    .success()
+    .stderr(predicate::str::contains("Removed workspace 'forced-ws'"));
+
+    assert!(
+        !repo_root.join("forced-ws").exists(),
+        "translated removal should delete the workspace directory"
+    );
+    assert!(
+        !repo_root.join(".jj-worktree-meta/forced-ws.json").exists(),
+        "translated removal should delete the metadata file"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10. add: leading directories like real git
+// ---------------------------------------------------------------------------
+
+/// Real git creates missing leading directories for the worktree path; the
+/// translated `jj workspace add` refuses when the parent is absent, so a
+/// caller passing a nested path such as `.kilo/worktrees/<name>` (Kilo Code /
+/// Agent Manager does) failed unless it pre-created the parents.
+#[test]
+fn add_creates_leading_directories() {
+    require_jj_and_git();
+
+    let (_tmp, repo_root, _main_ws) = setup_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    run_git_shim(
+        &repo_root,
+        &[
+            "worktree",
+            "add",
+            ".kilo/worktrees/nested-ws",
+            "-b",
+            "nested-ws",
+        ],
+        &shim_path,
+    )
+    .success()
+    .stderr(predicate::str::contains("Created workspace 'nested-ws'"));
+
+    assert!(
+        repo_root.join(".kilo/worktrees/nested-ws").exists(),
+        "nested workspace directory should be created"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. prune reap: forgotten jj workspaces are cleaned up
+// ---------------------------------------------------------------------------
+
+/// Callers that delete a worktree by renaming its directory aside and running
+/// `git worktree prune` (Kilo Code / Agent Manager does exactly this) only
+/// clean git's admin records; in a jj repository the workspace record lingers
+/// until a manual `jj workspace forget`. A caller-initiated prune through the
+/// shim reaps workspaces whose directory is gone.
+#[test]
+fn prune_reaps_forgotten_shim_workspace() {
+    require_jj_and_git();
+
+    let (_tmp, repo_root, _main_ws) = setup_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    // Create a workspace through the shim (records .jj-worktree-meta).
+    run_git_shim(&repo_root, &["worktree", "add", "reaped-ws"], &shim_path).success();
+
+    // Delete it the way git clients do: rename aside, then prune.
+    let aside = repo_root.join(".kilo-reaped-tmp");
+    std::fs::rename(repo_root.join("reaped-ws"), &aside).expect("rename ws aside");
+    run_git_shim(
+        &repo_root,
+        &["worktree", "prune", "--expire", "now"],
+        &shim_path,
+    )
+    .success()
+    .stderr(predicate::str::contains("Forgotten workspace 'reaped-ws'"));
+
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("reaped-ws"),
+        "workspace with deleted directory should be forgotten, got: {}",
+        stdout
+    );
+    assert!(
+        !repo_root.join(".jj-worktree-meta/reaped-ws.json").exists(),
+        "stale metadata file should be removed"
+    );
+
+    std::fs::remove_dir_all(&aside).ok();
+}
+
+/// The reap resolves workspace paths through `jj workspace root --name`
+/// rather than the shim's metadata, so workspaces created without the shim
+/// (e.g. plain `jj workspace add` from another tool) are cleaned up too.
+#[test]
+fn prune_reaps_forgotten_workspace_without_metadata() {
+    require_jj_and_git();
+
+    let (_tmp, repo_root, _main_ws) = setup_jj_repo();
+
+    // Create a workspace with plain jj: no .jj-worktree-meta entry exists.
+    let status = Command::new("jj")
+        .args(["workspace", "add", "plain-ws"])
+        .current_dir(&repo_root)
+        .output()
+        .expect("jj workspace add plain-ws");
+    assert!(status.status.success());
+
+    std::fs::remove_dir_all(repo_root.join("plain-ws")).expect("delete ws dir");
+
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+    run_git_shim(
+        &repo_root,
+        &["worktree", "prune", "--expire", "now"],
+        &shim_path,
+    )
+    .success()
+    .stderr(predicate::str::contains("Forgotten workspace 'plain-ws'"));
+
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("plain-ws"),
+        "meta-less workspace with deleted directory should be forgotten"
+    );
+}
+
+/// The reap is surgical: live workspaces and the protected default workspace
+/// must survive a caller-initiated prune.
+#[test]
+fn prune_spares_live_and_protected_workspaces() {
+    require_jj_and_git();
+
+    let (_tmp, repo_root, _main_ws) = setup_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    run_git_shim(&repo_root, &["worktree", "add", "kept-ws"], &shim_path).success();
+
+    run_git_shim(
+        &repo_root,
+        &["worktree", "prune", "--expire", "now"],
+        &shim_path,
+    )
+    .success();
+
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("kept-ws"),
+        "live workspace should survive prune, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("default"),
+        "protected default workspace should survive prune, got: {}",
+        stdout
+    );
+    assert!(
+        repo_root.join("kept-ws").exists(),
+        "live workspace directory should survive prune"
+    );
+    assert!(
+        repo_root.join(".jj-worktree-meta/kept-ws.json").exists(),
+        "live workspace metadata should survive prune"
+    );
+}
+
+/// `git worktree prune -n` / `--dry-run` is a read-only preview: it must not
+/// forget jj workspaces or delete their metadata. (Regression: the reap used
+/// to run before real git saw the options, so a dry-run mutated jj state.)
+#[test]
+fn prune_dry_run_leaves_workspaces_untouched() {
+    require_jj_and_git();
+
+    let (_tmp, repo_root, _main_ws) = setup_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    run_jj_worktree(&repo_root, &["add", "dry-ws"]).success();
+    std::fs::rename(repo_root.join("dry-ws"), repo_root.join(".dry-run-aside"))
+        .expect("rename ws aside");
+
+    for dry_flag in ["-n", "--dry-run"] {
+        run_git_shim(&repo_root, &["worktree", "prune", dry_flag], &shim_path).success();
+    }
+
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("dry-ws"),
+        "dry-run must not forget the workspace"
+    );
+    assert!(
+        repo_root.join(".jj-worktree-meta/dry-ws.json").exists(),
+        "dry-run must not delete the metadata file"
+    );
+    assert!(
+        repo_root.join(".git/worktrees").read_dir().unwrap().count() > 0,
+        "dry-run must not remove git's admin records"
+    );
+
+    std::fs::remove_dir_all(repo_root.join(".dry-run-aside")).ok();
+}
+
+/// Real git's `prune --expire <time>` keeps records younger than the expiry.
+/// The reap must keep the jj workspace record for them too, so both sides
+/// agree; the workspace is only reaped once the expiry is reached.
+#[test]
+fn prune_respects_expire() {
+    require_jj_and_git();
+
+    let (_tmp, root) = setup_colocated_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    run_git_shim(&root, &["worktree", "add", "expired-ws"], &shim_path).success();
+    std::fs::remove_dir_all(root.join("expired-ws")).expect("delete ws dir");
+
+    // Young record: real git keeps it even with the dir gone.
+    run_git_shim(
+        &root,
+        &["worktree", "prune", "--expire", "1.year.ago"],
+        &shim_path,
+    )
+    .success();
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("expired-ws"),
+        "workspace kept by git's expiry must not be reaped"
+    );
+
+    // Expiry reached: both sides agree it is gone.
+    run_git_shim(&root, &["worktree", "prune", "--expire", "now"], &shim_path).success();
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("expired-ws"),
+        "workspace pruned by git's expiry should be forgotten"
+    );
+}
+
+/// Real git never prunes locked worktree records. The reap must keep the jj
+/// workspace record for a locked workspace as well, and reap it only after
+/// the record is unlocked.
+#[test]
+fn prune_spares_locked_workspaces() {
+    require_jj_and_git();
+
+    let (_tmp, root) = setup_colocated_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    run_git_shim(&root, &["worktree", "add", "locked-ws"], &shim_path).success();
+    // `lock` is not translatable, so this reaches real git.
+    run_git_shim(&root, &["worktree", "lock", "locked-ws"], &shim_path).success();
+    std::fs::remove_dir_all(root.join("locked-ws")).expect("delete ws dir");
+
+    run_git_shim(&root, &["worktree", "prune", "--expire", "now"], &shim_path).success();
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("locked-ws"),
+        "workspace whose git record is locked must not be reaped"
+    );
+
+    run_git_shim(&root, &["worktree", "unlock", "locked-ws"], &shim_path).success();
+    run_git_shim(&root, &["worktree", "prune", "--expire", "now"], &shim_path).success();
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("locked-ws"),
+        "workspace whose git record was unlocked should be forgotten"
+    );
+}
+
+/// End-to-end regression for the extension's delete flow in its native
+/// colocated layout: rename the worktree aside, then
+/// `git worktree prune --expire now` — the colocated jj workspace record must
+/// be forgotten along with git's admin record.
+#[test]
+fn prune_reaps_forgotten_colocated_workspace() {
+    require_jj_and_git();
+
+    let (_tmp, root) = setup_colocated_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    run_git_shim(&root, &["worktree", "add", "ext-ws"], &shim_path).success();
+    std::fs::rename(root.join("ext-ws"), root.join(".ext-aside")).expect("rename ws aside");
+
+    run_git_shim(&root, &["worktree", "prune", "--expire", "now"], &shim_path)
+        .success()
+        .stderr(predicate::str::contains("Forgotten workspace 'ext-ws'"));
+
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("ext-ws"),
+        "colocated workspace with removed directory should be forgotten"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. jj as caller: its internal git worktree calls pass through
+// ---------------------------------------------------------------------------
+
+/// In a colocated repository jj itself spawns `git worktree add --orphan ...`
+/// to create the backing git worktree of a new workspace. With the shim ahead
+/// of git on PATH those internal calls land on the shim; translating them
+/// re-enters `jj workspace add` and recurses until the operation fails. The
+/// shim detects that the parent process is `jj` and passes through.
+fn setup_colocated_jj_repo() -> (TempDir, PathBuf) {
+    let tmp = TempDir::new().expect("failed to create temp dir");
+    let root = tmp.path().canonicalize().expect("canonicalize tmp");
+
+    let status = Command::new("jj")
+        .args(["git", "init", "--colocate", "."])
+        .current_dir(&root)
+        .output()
+        .expect("jj git init --colocate");
+    assert!(
+        status.status.success(),
+        "jj git init --colocate failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    (tmp, root)
+}
+
+/// Run `jj` with the shim ahead of git on PATH, as a real child process so
+/// the shim's caller-identity check sees `jj` as its parent.
+///
+/// Installs the `git -> jj-worktree` symlink in `shim_path` first (like
+/// `run_git_shim` does): with an empty directory, jj would find real git
+/// later on PATH and the caller-identity guard would never be exercised.
+/// `env_overrides` sets additional environment variables for the jj child.
+fn run_jj_with_shim_on_path(
+    root: &Path,
+    args: &[&str],
+    shim_path: &Path,
+    env_overrides: &[(&str, &str)],
+) -> std::process::Output {
+    let git_link = shim_path.join("git");
+    if !git_link.exists() {
+        std::os::unix::fs::symlink(jj_worktree_bin(), &git_link)
+            .expect("failed to create git symlink");
+    }
+
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let shim_first = format!("{}:{}", shim_path.display(), original_path);
+    Command::new("jj")
+        .args(args)
+        .current_dir(root)
+        .env("PATH", &shim_first)
+        .envs(env_overrides.iter().copied())
+        .output()
+        .expect("run jj with shim on PATH")
+}
+
+#[test]
+fn jj_internal_git_worktree_calls_do_not_recurse() {
+    require_jj_and_git();
+
+    let (_tmp, root) = setup_colocated_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    let output = run_jj_with_shim_on_path(&root, &["workspace", "add", "inner"], &shim_path, &[]);
+    assert!(
+        output.status.success(),
+        "jj workspace add must not recurse through the shim, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("External git program failed"),
+        "jj's internal git call must reach real git, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let list = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains("inner"),
+        "colocated workspace should be created, got: {}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+}
+
+/// The same guard applies to jj's own prunes: a caller-initiated prune gets
+/// the reap, but jj's internal prune (parent is jj) must stay pure
+/// pass-through so it never reaps the workspace it is currently managing.
+#[test]
+fn jj_internal_prune_stays_pure_passthrough() {
+    require_jj_and_git();
+
+    let (_tmp, root) = setup_colocated_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    let added = run_jj_with_shim_on_path(&root, &["workspace", "add", "inner"], &shim_path, &[]);
+    assert!(added.status.success());
+
+    let forgotten =
+        run_jj_with_shim_on_path(&root, &["workspace", "forget", "inner"], &shim_path, &[]);
+    assert!(
+        forgotten.status.success(),
+        "jj workspace forget must work with the shim on PATH, stderr: {}",
+        String::from_utf8_lossy(&forgotten.stderr)
+    );
+
+    let list = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        !stdout.contains("inner"),
+        "inner workspace should be forgotten, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("default"),
+        "default workspace must survive, got: {}",
+        stdout
+    );
+}
+
+/// The caller-identity check must not depend on the verbose-logging option:
+/// with `JJ_WORKTREE_ISSUE_INCLUDE_CMDLINE=1` the JSONL log records the
+/// parent's full argv (`jj workspace add inner`), but identity comparison
+/// against `"jj"` must still succeed, or jj's internal `remove`/`prune`
+/// would be translated (and its prune would reap).
+#[test]
+fn jj_internal_calls_pass_through_with_verbose_issue_log() {
+    require_jj_and_git();
+
+    let (_tmp, root) = setup_colocated_jj_repo();
+    let shim_dir = TempDir::new().unwrap();
+    let shim_path = shim_dir.path().canonicalize().unwrap();
+
+    let env = [("JJ_WORKTREE_ISSUE_INCLUDE_CMDLINE", "1")];
+
+    let added = run_jj_with_shim_on_path(&root, &["workspace", "add", "inner"], &shim_path, &env);
+    assert!(
+        added.status.success(),
+        "jj workspace add must not recurse with verbose issue logging, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&added.stdout),
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let forgotten =
+        run_jj_with_shim_on_path(&root, &["workspace", "forget", "inner"], &shim_path, &env);
+    assert!(
+        forgotten.status.success(),
+        "jj workspace forget must pass through with verbose issue logging, stderr: {}",
+        String::from_utf8_lossy(&forgotten.stderr)
+    );
+
+    let list = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        !stdout.contains("inner"),
+        "inner workspace should be forgotten, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("default"),
+        "default workspace must survive, got: {}",
+        stdout
+    );
+}

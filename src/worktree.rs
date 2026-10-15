@@ -168,6 +168,19 @@ fn cmd_add(cwd: &Path, args: &[String]) -> Result<(), Box<dyn std::error::Error>
         .ok_or("invalid path: cannot determine workspace name")?
         .to_string();
 
+    // Match real git, which creates any missing leading directories for the
+    // worktree path. `jj workspace add` requires the destination's parent to
+    // exist, so a caller that passes e.g. `.kilo/worktrees/<name>` fails when
+    // `.kilo/worktrees` is absent. (An existing, empty destination is fine.)
+    let dest = if ws_path.is_absolute() {
+        ws_path.to_path_buf()
+    } else {
+        cwd.join(ws_path)
+    };
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     // 1. jj workspace add <path>
     jj::run_stdout(Some(&repo_root), &["workspace", "add", &parsed.path])?;
 
@@ -339,14 +352,14 @@ fn get_workspace_path(
     Ok(candidate.to_string_lossy().to_string())
 }
 
-/// `jj-worktree remove [--force] <path>`
+/// `jj-worktree remove [-f | --force] <path>`
 fn cmd_remove(cwd: &Path, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut force = false;
     let mut path: Option<String> = None;
 
     for arg in args {
         match arg.as_str() {
-            "--force" => force = true,
+            "--force" | "-f" => force = true,
             a if a.starts_with('-') => {
                 return Err(format!("unknown option: {a}").into());
             }
@@ -459,6 +472,227 @@ fn cmd_remove(cwd: &Path, args: &[String]) -> Result<(), Box<dyn std::error::Err
         target_path.display()
     );
     Ok(())
+}
+
+/// Whether `git worktree prune <args>` is a dry-run (`--dry-run`, `-n`, or a
+/// short-option cluster containing `n`, e.g. `-vn`). A dry-run is a read-only
+/// preview: it must not mutate jj state either.
+pub fn prune_is_dry_run(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a == "--dry-run" || (a.starts_with('-') && !a.starts_with("--") && a.contains('n'))
+    })
+}
+
+/// Real git's view of the worktree admin records, mirroring the decision the
+/// upcoming `git worktree prune` will make.
+///
+/// - `tracked`: worktree roots real git has admin records for.
+/// - `prunable`: worktree roots real git *this invocation* would prune
+///   (from its `--dry-run` report on stderr, so `--expire` and lock semantics
+///   come from real git itself rather than being reimplemented here).
+///
+/// `None` when real git is unavailable or the dry-run fails: the caller then
+/// falls back to forgetting every directory-gone workspace (the behavior
+/// before mirroring was introduced).
+struct GitPruneView {
+    tracked: std::collections::HashSet<PathBuf>,
+    prunable: std::collections::HashSet<PathBuf>,
+}
+
+fn git_prune_view(repo_root: &Path, prune_args: &[String]) -> Option<GitPruneView> {
+    let git = crate::shim::find_real_git().ok()?;
+    let output = std::process::Command::new(&git)
+        .arg("-C")
+        .arg(repo_root)
+        .args(["worktree", "prune", "--dry-run"])
+        .args(prune_args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        jj::debug_message(&format!(
+            "prune reap: dry-run failed ({:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+        return None;
+    }
+    // The dry-run report ("Removing worktrees/<id>: <reason>") goes to
+    // stderr, not stdout (verified against git 2.55); parse both streams so
+    // the mirror follows whichever channel git emits.
+    let report = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    jj::debug_message(&format!("prune reap: dry-run report: {report:?}"));
+    let mut prunable = std::collections::HashSet::new();
+    for line in report.lines() {
+        // Dry-run prints "Removing worktrees/<id>: <reason>" per record that
+        // this prune would remove. Locked or not-yet-expired records get no
+        // such line.
+        let Some(rest) = line.strip_prefix("Removing worktrees/") else {
+            continue;
+        };
+        let Some((id, _reason)) = rest.split_once(':') else {
+            continue;
+        };
+        if let Some(path) = worktree_path_for_record(repo_root, id.trim()) {
+            prunable.insert(path);
+        }
+    }
+    let mut tracked = std::collections::HashSet::new();
+    let admin_dir = repo_root.join(".git").join("worktrees");
+    if let Ok(entries) = std::fs::read_dir(&admin_dir) {
+        for entry in entries.flatten() {
+            let id = entry.file_name().to_string_lossy().to_string();
+            if let Some(path) = worktree_path_for_record(repo_root, &id) {
+                tracked.insert(path);
+            }
+        }
+    }
+    Some(GitPruneView { tracked, prunable })
+}
+
+/// The worktree root path recorded in `<git_common_dir>/worktrees/<id>/gitdir`.
+///
+/// The file holds the path of the worktree's `.git` file, either absolute or
+/// relative to the record directory. Returns `None` when the record cannot be
+/// read or the path cannot be determined.
+fn worktree_path_for_record(repo_root: &Path, id: &str) -> Option<PathBuf> {
+    let record_dir = repo_root.join(".git").join("worktrees").join(id);
+    let content = std::fs::read_to_string(record_dir.join("gitdir")).ok()?;
+    let git_file = Path::new(content.trim());
+    let resolved = if git_file.is_absolute() {
+        git_file.to_path_buf()
+    } else {
+        record_dir.join(git_file)
+    };
+    let resolved = normalize_path(&resolved);
+    // The gitdir points at the worktree's `.git` file; the worktree root is
+    // its parent directory.
+    if resolved.file_name().and_then(|n| n.to_str()) == Some(".git") {
+        resolved.parent().map(|p| p.to_path_buf())
+    } else {
+        Some(resolved)
+    }
+}
+
+/// Reap jj workspaces whose working directory no longer exists.
+///
+/// Callers that delete a worktree by renaming its directory aside and running
+/// `git worktree prune` (Kilo Code / Agent Manager does exactly this) only
+/// clean git's own admin records: the colocated jj workspace record then
+/// lingers until a manual `jj workspace forget`. Workspaces created without
+/// this shim (no `.jj-worktree-meta` entry) are covered too, because the
+/// recorded path comes from `jj workspace root --name` itself.
+///
+/// The reap mirrors real git's prune decision (see [`GitPruneView`]) so the
+/// two sides never disagree about which worktrees exist: a workspace whose
+/// admin record real git keeps (`--expire` not reached, or the record is
+/// locked) keeps its jj workspace record, while one git prunes -- or one with
+/// no git admin record at all -- is forgotten. Dry-runs never reach this
+/// function (see [`prune_is_dry_run`]).
+///
+/// Best effort: failures are reported on stderr and skipped, never
+/// propagated, so the subsequent real-git prune is not disturbed. Only the
+/// protected workspaces are exempt.
+pub fn reap_forgotten_workspaces(cwd: &Path, prune_args: &[String]) {
+    let repo_root = match jj::find_repo_root(cwd) {
+        Some(root) => root,
+        None => return,
+    };
+    let ws_list_output = match jj::run_stdout(Some(&repo_root), &["workspace", "list"]) {
+        Ok(output) => output,
+        Err(_) => return,
+    };
+    let prune_view = git_prune_view(&repo_root, prune_args);
+    for ws_name in parse_workspace_names(&ws_list_output) {
+        if PROTECTED_WORKSPACES.contains(&ws_name.as_str()) {
+            continue;
+        }
+        // Ask jj for the recorded path instead of consulting metadata, so
+        // workspaces created outside this shim (no .jj-worktree-meta entry)
+        // are reaped as well.
+        let recorded =
+            match jj::run_stdout(Some(&repo_root), &["workspace", "root", "--name", &ws_name]) {
+                Ok(path) => PathBuf::from(path),
+                Err(e) => {
+                    jj::debug_message(&format!(
+                        "prune reap: cannot resolve path of workspace '{ws_name}': {e}"
+                    ));
+                    continue;
+                }
+            };
+        let recorded = normalize_path(Path::new(&recorded));
+        if recorded.exists() {
+            continue;
+        }
+        // Mirror real git: keep the jj record for a worktree whose admin
+        // record real git is keeping (locked, or not yet expired).
+        if let Some(view) = &prune_view
+            && view.tracked.contains(&recorded)
+            && !view.prunable.contains(&recorded)
+        {
+            jj::debug_message(&format!(
+                "prune reap: real git keeps the record of workspace '{ws_name}', skipping"
+            ));
+            continue;
+        }
+        if let Err(e) = jj::run_stdout(Some(&repo_root), &["workspace", "forget", &ws_name]) {
+            eprintln!("warning: failed to forget workspace '{ws_name}': {e}");
+            continue;
+        }
+        // Best effort: drop the stale metadata file if one exists.
+        let _ = meta::remove(&repo_root, &ws_name);
+        eprintln!("Forgotten workspace '{ws_name}' at {}", recorded.display());
+    }
+}
+
+/// Whether a shim-mode `git worktree remove <args>` targets a workspace
+/// registered with jj.
+///
+/// Git-native worktrees (created via the `add --detach` / `-d` / `--orphan`
+/// passthrough) are unknown to jj; translating their removal would fail with
+/// "no workspace found for path" and leave the worktree behind. Such targets
+/// belong to real git, which applies its own safety checks (uncommitted
+/// changes, locked worktrees, main-worktree protection). Direct-mode
+/// `jj-worktree remove` is unaffected: it always runs jj semantics and errors
+/// on unregistered paths.
+pub fn remove_targets_registered_workspace(cwd: &Path, args: &[String]) -> bool {
+    // args[0] is the "remove" head; the target is the first positional, and
+    // flags (`--force` / `-f`) do not affect it.
+    let rest = if args.first().map(String::as_str) == Some("remove") {
+        &args[1..]
+    } else {
+        args
+    };
+    let mut path: Option<&String> = None;
+    for arg in rest {
+        if arg.starts_with('-') {
+            continue;
+        }
+        if path.is_none() {
+            path = Some(arg);
+        }
+    }
+    let Some(path_str) = path else {
+        return false;
+    };
+    let Some(repo_root) = jj::find_repo_root(cwd) else {
+        return false;
+    };
+    let Ok(target_path) = resolve_path(cwd, path_str) else {
+        return false;
+    };
+    // Mirror cmd_remove's containment check so a path outside the repository
+    // is never translated on the strength of the basename fallback alone.
+    let canonical_repo_root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.clone());
+    if !target_path.starts_with(&canonical_repo_root) {
+        return false;
+    }
+    find_workspace_name(&repo_root, &target_path).is_ok()
 }
 
 /// Find workspace name by matching the canonical path against known workspaces.
@@ -758,5 +992,19 @@ mod tests {
     fn parse_add_args_too_many_positionals_errors() {
         let _g = IssueLogGuard::new();
         assert!(parse_add_args(&s(&["a", "b", "c"])).is_err());
+    }
+
+    #[test]
+    fn prune_is_dry_run_matches_dry_run_flags() {
+        assert!(prune_is_dry_run(&s(&["-n"])));
+        assert!(prune_is_dry_run(&s(&["--dry-run"])));
+        assert!(prune_is_dry_run(&s(&["-vn"])));
+        assert!(prune_is_dry_run(&s(&["--expire", "now", "-n"])));
+        assert!(!prune_is_dry_run(&s(&[])));
+        assert!(!prune_is_dry_run(&s(&["--expire", "now"])));
+        assert!(!prune_is_dry_run(&s(&["-v"])));
+        // Long options must not be treated as short clusters: `--no-*` does
+        // not contain the dry-run flag.
+        assert!(!prune_is_dry_run(&s(&["--verbose"])));
     }
 }

@@ -101,7 +101,7 @@ fn is_jj_worktree_binary(path: &Path) -> bool {
 ///
 /// 1. If `JJ_WORKTREE_REAL_GIT` is set, use that.
 /// 2. Otherwise, search PATH for a `git` that is not a jj-worktree binary.
-fn find_real_git() -> Result<PathBuf, Box<dyn std::error::Error>> {
+pub(crate) fn find_real_git() -> Result<PathBuf, Box<dyn std::error::Error>> {
     // Check environment variable override
     if let Ok(path) = env::var("JJ_WORKTREE_REAL_GIT") {
         let p = PathBuf::from(&path);
@@ -240,11 +240,64 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     match (subcmd.as_str(), &repo_root) {
         ("worktree", Some(_root)) => {
+            // The module's contract is that the shim is a drop-in `git`: it
+            // translates the worktree operations it fully understands and
+            // passes everything else through to real git. Only `add` (a user
+            // worktree, not a detached pool slot) and `remove` need jj
+            // semantics; `list` gains no jj-specific value here because a
+            // colocated workspace *is* a real git worktree, and the plain
+            // `jj-worktree list` formatting is not porcelain and rejects git's
+            // own options. Anything else -- `prune`, `move`, `repair`, a
+            // detached request (`--detach` or its short form `-d`), `--orphan`
+            // -- falls through to real git.
+            let worktree_args: Vec<String> = args[subcmd_index + 1..].to_vec();
+            let sub = worktree_args.first().map(String::as_str);
+            let has = |flag: &str| worktree_args.iter().any(|a| a == flag);
+            let translate = match sub {
+                Some("add") => !has("--detach") && !has("--orphan") && !has("-d"),
+                Some("remove") => {
+                    // Translate only when the target is a workspace registered
+                    // with jj; git-native worktrees (e.g. created via the
+                    // `add --detach`/`-d`/`--orphan` passthrough) are unknown
+                    // to jj and belong to real git, which applies its own
+                    // safety checks.
+                    crate::worktree::remove_targets_registered_workspace(&start_dir, &worktree_args)
+                }
+                Some("list") => worktree_args.iter().skip(1).all(|a| !a.starts_with('-')),
+                _ => false,
+            };
+            let is_jj_caller = crate::issue_log::caller_is_jj();
+            // jj itself (colocated repos) spawns `git worktree` internally to
+            // create/prune/remove the backing git worktree. If this shim is
+            // ahead of real git in PATH -- which it is whenever it is installed
+            // as the `git` on PATH -- those internal calls land here. Skipping
+            // the translation for jj's own calls avoids re-entering `jj
+            // workspace add` and recursing until the operation fails.
+            //
+            // A caller-initiated prune needs one more thing first. Callers
+            // delete a worktree by renaming the directory aside and running
+            // `git worktree prune`, and real git's prune only cleans git's own
+            // admin records -- the colocated jj workspace record would then
+            // linger until a manual `jj workspace forget`. Before handing the
+            // call to real git, forget workspaces whose directories are already
+            // gone -- but only where real git agrees: a dry-run must not
+            // mutate anything, and a record real git keeps (`--expire` not
+            // reached, or locked) keeps its jj workspace record too, so the
+            // two sides never disagree about which worktrees exist. jj's own
+            // internal prunes stay pure pass-through.
+            if sub == Some("prune")
+                && !is_jj_caller
+                && !crate::worktree::prune_is_dry_run(&worktree_args[1..])
+            {
+                crate::worktree::reap_forgotten_workspaces(&start_dir, &worktree_args[1..]);
+            }
+            if !translate || is_jj_caller {
+                return exec_real_git(args);
+            }
             // Redirect to jj-worktree's worktree module.
             // Pass `start_dir` (which honours `git -C <path>`) so that the
             // worktree subcommands resolve `.jj` relative to that path rather
             // than the process-level current directory.
-            let worktree_args: Vec<String> = args[subcmd_index + 1..].to_vec();
             crate::worktree::run(&start_dir, &worktree_args)
         }
         ("branch", Some(root)) => {

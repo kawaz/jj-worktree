@@ -9,7 +9,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueKind {
@@ -77,6 +77,82 @@ fn parent_pid() -> u32 {
     }
 }
 
+/// Basename-only process name of the given pid.
+///
+/// Unlike [`caller_cmdline`], this lookup must not depend on the
+/// verbose-logging option: `JJ_WORKTREE_ISSUE_INCLUDE_CMDLINE=1` opts the
+/// JSONL log into the parent's full argv (`jj workspace add inner`), which
+/// would fail an identity check comparing against `"jj"`. Identity and
+/// logging are therefore kept separate.
+///
+/// Linux: read `/proc/<pid>/comm` (exactly the executable basename).
+/// macOS / BSD: shell out to `ps -p <pid> -o comm=` with a hard timeout.
+/// `ps -o comm=` may print a full executable path on some platforms, so the
+/// result is reduced to its basename. Returns an empty string on failure or
+/// unsupported platform.
+fn caller_process_name(ppid: u32) -> String {
+    if ppid == 0 {
+        return String::new();
+    }
+    if let Ok(content) = fs::read(format!("/proc/{ppid}/comm"))
+        && !content.is_empty()
+    {
+        return String::from_utf8_lossy(&content).trim().to_string();
+    }
+    let out = ps_field(ppid, "comm=");
+    Path::new(&out)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&out)
+        .to_string()
+}
+
+/// Read a single `ps -o <ps_field>` value for the given pid.
+///
+/// Shelling out to ps has a hard timeout so a stuck environment cannot
+/// deadlock the shim. We rely on `Command::output` returning promptly under
+/// normal conditions; the deadline is enforced via a thread + try_wait loop
+/// because the standard library lacks a built-in.
+///
+/// Returns an empty string on any failure.
+fn ps_field(ppid: u32, ps_field: &str) -> String {
+    let Ok(mut child) = std::process::Command::new("ps")
+        .args(["-p", &ppid.to_string(), "-o", ps_field])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return String::new();
+    };
+    // Poll up to ~200ms for the child to exit. ps should respond in <10ms
+    // in practice; anything slower means the system is misbehaving and we
+    // prefer an empty result over blocking the shim.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let mut out = String::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    use std::io::Read;
+                    let _ = stdout.read_to_string(&mut out);
+                }
+                return out.trim().to_string();
+            }
+            Ok(Some(_)) => return String::new(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return String::new();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return String::new(),
+        }
+    }
+}
+
 /// Best-effort retrieval of the parent process command line.
 ///
 /// Privacy: the parent's full argv may contain secrets passed as CLI flags
@@ -86,11 +162,9 @@ fn parent_pid() -> u32 {
 /// (`comm`) is captured.
 ///
 /// Lookup paths:
-/// - Linux: read `/proc/<ppid>/cmdline` (full argv) or `/proc/<ppid>/comm`
-///   (basename only).
-/// - macOS / others: shell out to `ps -p <ppid> -o command=` (full) or
-///   `ps -p <ppid> -o comm=` (basename). The `ps` invocation has a hard
-///   timeout to prevent the shim from hanging on a misbehaving system.
+/// - Linux: read `/proc/<ppid>/cmdline` (full argv).
+/// - macOS / others: shell out to `ps -p <ppid> -o command=`.
+/// - The basename-only path is shared with [`caller_process_name`].
 ///
 /// Returns an empty string on any failure or unsupported platform.
 fn caller_cmdline(ppid: u32) -> String {
@@ -98,70 +172,40 @@ fn caller_cmdline(ppid: u32) -> String {
         return String::new();
     }
     let include_full = std::env::var("JJ_WORKTREE_ISSUE_INCLUDE_CMDLINE").as_deref() == Ok("1");
-
-    // Linux: read from /proc.
-    let proc_path = if include_full {
-        format!("/proc/{ppid}/cmdline")
-    } else {
-        format!("/proc/{ppid}/comm")
-    };
-    if let Ok(content) = fs::read(&proc_path)
-        && !content.is_empty()
-    {
-        let s = if include_full {
-            // /proc/<pid>/cmdline is NUL-separated; rejoin with spaces.
-            content
+    if include_full {
+        // Linux: /proc/<pid>/cmdline is NUL-separated; rejoin with spaces.
+        if let Ok(content) = fs::read(format!("/proc/{ppid}/cmdline"))
+            && !content.is_empty()
+        {
+            return content
                 .split(|b| *b == 0)
                 .filter(|s| !s.is_empty())
                 .map(|s| String::from_utf8_lossy(s).to_string())
                 .collect::<Vec<_>>()
-                .join(" ")
-        } else {
-            String::from_utf8_lossy(&content).trim().to_string()
-        };
-        return s;
-    }
-
-    // macOS / BSD: shell out to ps with a timeout so a stuck environment
-    // cannot deadlock the shim. We rely on `Command::output` returning
-    // promptly under normal conditions; the deadline is enforced via a
-    // thread + try_wait loop because the standard library lacks a built-in.
-    let ps_field = if include_full { "command=" } else { "comm=" };
-    if let Ok(mut child) = std::process::Command::new("ps")
-        .args(["-p", &ppid.to_string(), "-o", ps_field])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        // Poll up to ~200ms for the child to exit. ps should respond in <10ms
-        // in practice; anything slower means the system is misbehaving and we
-        // prefer an empty result over blocking the shim.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) if status.success() => {
-                    let mut out = String::new();
-                    if let Some(mut stdout) = child.stdout.take() {
-                        use std::io::Read;
-                        let _ = stdout.read_to_string(&mut out);
-                    }
-                    return out.trim().to_string();
-                }
-                Ok(Some(_)) => return String::new(),
-                Ok(None) => {
-                    if std::time::Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return String::new();
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(_) => return String::new(),
-            }
+                .join(" ");
         }
+        return ps_field(ppid, "command=");
     }
-    String::new()
+    caller_process_name(ppid)
+}
+
+/// Whether the immediate parent process is `jj`.
+///
+/// jj (colocated) spawns `git worktree add`/`prune`/... internally to manage
+/// its git worktree. When this shim is ahead of git in PATH, those calls land
+/// on the shim and, if translated, re-enter `jj workspace add`, recursing until
+/// the operation fails. Callers use this to pass jj's own calls through to real
+/// git instead of translating them.
+///
+/// The identity check uses a dedicated basename-only lookup
+/// ([`caller_process_name`]) so it stays correct regardless of whether
+/// `JJ_WORKTREE_ISSUE_INCLUDE_CMDLINE=1` opted the JSONL log into full argv.
+pub fn caller_is_jj() -> bool {
+    let ppid = parent_pid();
+    if ppid == 0 {
+        return false;
+    }
+    caller_process_name(ppid) == "jj"
 }
 
 /// Whether the AI-directed stderr block should be emitted.
@@ -245,6 +289,16 @@ mod tests {
             IssueKind::UnsupportedCombination.as_str(),
             "unsupported_combination"
         );
+    }
+
+    #[test]
+    fn caller_is_jj_is_false_when_parent_is_not_jj() {
+        // Under `cargo test` the parent of the test binary is cargo (or
+        // whatever launched it), never `jj`. This only pins the common case;
+        // the jj-parent path is exercised by the integration test
+        // `jj_internal_git_worktree_calls_do_not_recurse`, which spawns a
+        // real jj child process with the shim first on PATH.
+        assert!(!caller_is_jj());
     }
 
     #[test]

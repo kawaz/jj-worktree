@@ -41,6 +41,10 @@ A symlink `git -> jj-worktree` is placed at the front of `PATH`. Inside a jj rep
 | `git status [--porcelain]` | `jj diff --summary` |
 | `git rev-parse <ref>` | `jj log -r <ref> -T commit_id` (`HEAD` → `@`) |
 
+Anything else reaches real `git` unchanged. A colocated workspace *is* a real git worktree, so real git is the authority wherever a faithful translation does not exist: `git worktree prune`, `move`, `repair`, `lock`, optioned forms such as `list --porcelain`, and `add --detach` / `-d` / `--orphan` all pass through. So does every `git worktree` call issued by `jj` itself — jj manages the backing git worktree of its own workspaces, and translating those calls would recurse. `git worktree remove` only translates targets registered with `jj`; git-native worktrees (created via the detach/orphan passthrough) are passed to real git, whose own safety checks (uncommitted changes, locked worktrees, main-worktree protection) then apply.
+
+A caller-initiated `git worktree prune` additionally reaps jj workspaces whose working directory no longer exists: it runs `jj workspace forget` for each one (paths resolved via `jj workspace root --name`, so workspaces created without this shim are covered) and drops the stale `.jj-worktree-meta` entry. Callers that delete worktrees by renaming the directory aside and pruning (Kilo Code's Agent Manager, for example) thus leave no jj workspace records behind. The reap mirrors real git's own prune decision — it parses the `--dry-run` report git produces with the caller's forwarded options, so `--expire` and locked records are honored by git itself — and a `--dry-run` / `-n` prune never reaps anything. Protected workspaces (`default`, `main`) are never reaped, and prunes issued by `jj` itself stay pure pass-through.
+
 ## Install
 
 ```bash
@@ -89,7 +93,7 @@ jj-worktree remove [--force] <path>
 
 ## Unknown option handling
 
-`git worktree add` flags that have no `jj workspace` equivalent (`--track`, `--no-track`, `--lock`, `--reason`, `--guess-remote`, `--no-guess-remote`, `--detach`) are silently accepted as no-ops. Other unknown flags are also accepted, but each occurrence is recorded in the JSONL self-report log and an `[For AI agents]` block is emitted to stderr so AI-driven callers do not silently fall back. See [docs/decisions/DR-0001](./docs/decisions/DR-0001-lenient-unknown-options.md) and [DR-0002](./docs/decisions/DR-0002-self-reporting-mechanism.md).
+On a translated `git worktree add`, flags that have no `jj workspace` equivalent (`--track`, `--no-track`, `--lock`, `--reason`, `--guess-remote`, `--no-guess-remote`) are silently accepted as no-ops. `--detach`, `-d`, and `--orphan` are not translated at all — the whole call goes to real git. Other unknown flags are also accepted, but each occurrence is recorded in the JSONL self-report log and an `[For AI agents]` block is emitted to stderr so AI-driven callers do not silently fall back. See [docs/decisions/DR-0001](./docs/decisions/DR-0001-lenient-unknown-options.md), [DR-0002](./docs/decisions/DR-0002-self-reporting-mechanism.md) and [DR-0004](./docs/decisions/DR-0004-passthrough-untranslatable-worktree.md).
 
 ## License
 

@@ -41,6 +41,10 @@ argv[0] == "jj-worktree" -> direct モード: workspace コマンドを直接実
 | `git status [--porcelain]` | `jj diff --summary` |
 | `git rev-parse <ref>` | `jj log -r <ref> -T commit_id`（`HEAD` → `@`） |
 
+それ以外はすべて本物の `git` にそのまま渡されます。colocated workspace のバッキングストアは本物の git worktree なので、忠実な翻訳が存在しない操作では real git が正です: `git worktree prune`、`move`、`repair`、`lock`、`list --porcelain` のようなオプション付き形式、そして `add --detach` / `-d` / `--orphan` はすべて real git に pass-through します。`jj` 自身が発行する `git worktree` 呼び出しも同様です（jj は自ワークスペースのバッキング git worktree を管理しており、これを翻訳すると再帰します）。`git worktree remove` は `jj` に登録済みの対象のみ翻訳し、git 由来の worktree（detach/orphan pass-through で作成）は real git に渡されます。この場合 git 自身の安全機構（未コミット変更チェック、locked、メインワークスペース保護）が適用されます。
+
+呼び出し側起点の `git worktree prune` はさらに、作業ディレクトリが存在しない jj workspace を reap します: 各 workspace に対して `jj workspace forget` を実行し（パスは `jj workspace root --name` で解決するため、本 shim を経由せず作られた workspace も対象）、古い `.jj-worktree-meta` エントリを削除します。ディレクトリを退避してから prune する形で worktree を削除する呼び出し側（例: Kilo Code の Agent Manager）が jj workspace レコードを残留させないための仕組みです。reap は real git 自身の prune 判定と同期します — 呼び出し側オプションを転送した `--dry-run` レポートをパースするため、`--expire` や locked レコードの判定は git 自身に委譲されます — そして `--dry-run` / `-n` 付きの prune は何も reap しません。保護対象 workspace（`default`, `main`）は決して reap せず、`jj` 自身の発行する prune は純粋な pass-through のままです。
+
 ## インストール
 
 ```bash
@@ -89,7 +93,7 @@ jj-worktree remove [--force] <path>
 
 ## 未知オプションの取り扱い
 
-`git worktree add` のオプションのうち `jj workspace` に等価のないもの（`--track`, `--no-track`, `--lock`, `--reason`, `--guess-remote`, `--no-guess-remote`, `--detach`）は静かに no-op として受け入れます。それ以外の未知フラグも no-op として受け入れますが、その都度 JSONL の自己報告ログに記録し、`[For AI agents]` ブロックを stderr に出力するため、AI 駆動の呼び出し側が黙ってフォールバックすることを防げます。詳細は [docs/decisions/DR-0001](./docs/decisions/DR-0001-lenient-unknown-options.md) と [DR-0002](./docs/decisions/DR-0002-self-reporting-mechanism.md) を参照。
+翻訳対象の `git worktree add` では、`jj workspace` に等価のないオプション（`--track`, `--no-track`, `--lock`, `--reason`, `--guess-remote`, `--no-guess-remote`）は静かに no-op として受け入れます。`--detach`、`-d`、`--orphan` は翻訳せず、呼び出し全体を real git に渡します。それ以外の未知フラグも no-op として受け入れますが、その都度 JSONL の自己報告ログに記録し、`[For AI agents]` ブロックを stderr に出力するため、AI 駆動の呼び出し側が黙ってフォールバックすることを防げます。詳細は [docs/decisions/DR-0001](./docs/decisions/DR-0001-lenient-unknown-options.md)、[DR-0002](./docs/decisions/DR-0002-self-reporting-mechanism.md)、[DR-0004](./docs/decisions/DR-0004-passthrough-untranslatable-worktree.md) を参照。
 
 ## ライセンス
 

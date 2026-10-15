@@ -32,7 +32,7 @@ By creating a `git → jj-worktree` symlink and placing it at the front of PATH,
 src/
 ├── main.rs       # entry point, argv[0] dispatch, run command
 ├── shim.rs       # git shim: global option parsing, real git detection, command dispatch
-├── worktree.rs   # add/list/remove: implementation of jj workspace operations
+├── worktree.rs   # add/list/remove + prune reap: implementation of jj workspace operations
 ├── jj.rs         # jj command execution helpers, repository detection
 ├── meta.rs       # metadata CRUD (.jj-worktree-meta/*.json)
 ├── issue_log.rs  # self-reporting (DR-0002): JSONL log for unknown_option etc. + AI-directed stderr
@@ -67,6 +67,19 @@ git worktree remove <path>
   ├── jj workspace forget
   ├── remove directory
   └── remove metadata
+
+git worktree prune [--expire ...]   (caller-initiated: parent process is not jj)
+  ↓ shim.rs: reap workspaces whose directory is gone
+  ├── jj workspace list → workspace names
+  ├── for each non-protected workspace: jj workspace root --name <ws> → recorded path
+  └── path missing → jj workspace forget + remove stale metadata (best effort)
+  ↓ exec_real_git() — real git prunes its own admin records
+
+git worktree <untranslatable> (prune/move/repair/lock, list --porcelain, add --detach/--orphan)
+  ↓ shim.rs → exec_real_git()
+  (a colocated workspace IS a real git worktree; real git is authoritative.
+   The same applies to every git worktree call whose parent process is jj —
+   translating jj's own internal calls would recurse.)
 
 git branch -d <name>
   ↓ shim.rs: subcmd=="branch" + -d/-D/--delete
@@ -180,22 +193,25 @@ Log format (JSONL):
 {"ts":"2026-03-30T09:00:00.123Z","pid":1234,"msg":"exec real git: /usr/bin/git --version"}
 ```
 
-## Lenient pass-through of unknown options (DR-0001 / DR-0002)
+## Pass-through policy (DR-0001 / DR-0002 / DR-0004)
 
-The set of options that callers (e.g. Claude Code) pass to `git worktree add` may grow as those callers evolve. `jj-worktree` handles this leniently:
+The set of options that callers (e.g. Claude Code) pass to `git worktree add` may grow as those callers evolve, and some callers install the shim as the system-wide `git`. `jj-worktree` handles this with a layered policy:
 
-1. **Explicit no-op list**: `--track` / `--no-track` / `--lock` / `--reason <val>` / `--guess-remote` / `--no-guess-remote` / `--detach` are silently ignored because there is no equivalent concept on the `jj workspace` side.
+1. **Explicit no-op list (translated calls only)**: `--track` / `--no-track` / `--lock` / `--reason <val>` / `--guess-remote` / `--no-guess-remote` are silently ignored on a translated `add` because there is no equivalent concept on the `jj workspace` side. `--detach` / `-d` / `--orphan` are not translated at all — the whole call passes through to real git.
 2. **Unknown `--xxx` / `-x` flags**: instead of failing, the shim records a warning entry via `issue_log` and emits a `[For AI agents]` directed block on stderr, then accepts the flag as a no-op. Because the shim cannot tell whether a value follows, `--xxx=val` is consumed as a single argument, while a bare `--xxx` does not consume the next argument as a value.
+3. **Drop-in contract (DR-0004)**: the shim translates only the worktree operations it can fully honor (`add` without `--detach`/`-d`/`--orphan`, `remove` of a jj-registered worktree, bare `list`). Everything else — `prune`, `move`, `repair`, `lock`, optioned forms such as `list --porcelain` — reaches real git unchanged, and so does every `git worktree` call whose parent process is `jj` (`caller_is_jj` guard), because jj manages the backing git worktree of its own workspaces and translating those calls recurses. `remove` of a git-native worktree (created via the `--detach` / `-d` / `--orphan` passthrough) is likewise passed to real git, which applies its own safety checks (uncommitted changes, locked worktrees, main-worktree protection).
+4. **Prune reap (DR-0004)**: before passing a caller-initiated `prune` to real git, the shim forgets workspaces whose recorded directory (`jj workspace root --name`, meta-independent) no longer exists and drops their stale metadata. The reap mirrors real git's own prune decision — it parses the `--dry-run` report real git produces with the caller's forwarded options (the report arrives on stderr), so `--expire` and locked records are honored by real git itself instead of being reimplemented — and skips workspaces real git would keep. `--dry-run` / `-n` never reaches the reap at all, and protected workspaces plus jj's own prunes stay exempt / pure pass-through.
 
 The self-report log (`issues.log`) records a `kind` of `unknown_option` / `parse_error` / `unsupported_combination`, plus `ts` / `cmd` / `option` / `argv` / `caller_pid` / `caller_cmdline`. This surfaces gaps to the user before AI agents silently fall back.
 
 ## Safety mechanisms
 
-1. **main/default workspace protection**: `remove` rejects deletion
+1. **main/default workspace protection**: `remove` rejects deletion; the prune reap never forgets them
 2. **uncommitted change check**: `remove` checks `jj diff --stat` (override with `--force`)
 3. **path containment**: `remove` verifies that the target path is under repo_root
 4. **scoped bookmark deletion**: only names recorded in the metadata are targeted
 5. **shim bypass**: `JJ_WORKTREE_DISABLED=1` falls back to real git immediately
+6. **best-effort prune reap**: reap failures are warnings on stderr and never block the subsequent real git prune
 
 ## Build and release
 
@@ -236,13 +252,15 @@ brew install kawaz/tap/jj-worktree
 
 ## Tests
 
-70 tests (48 unit + 22 integration)
+110 tests (69 unit + 41 integration)
 
 ### Unit tests
 
 - `jj.rs`: find_repo_root, build_command (4)
 - `meta.rs`: save/load/remove/list/serialization (9)
 - `shim.rs`: parse_git_global_opts (18), parse_branch_delete (6), parse_rev_parse_refs (9)
+- `worktree.rs`: parse_add_args (16), prune_is_dry_run (1)
+- `issue_log.rs`: kind strings, log path override, JSONL entry, caller_is_jj (4)
 - `main.rs`: invocation_mode, help (2)
 
 ### Integration tests (tests/integration.rs)
@@ -257,6 +275,11 @@ Each test initializes a jj repository in a temporary directory before running:
 6. list: format / empty repository / via shim
 7. remove: safety checks / main protection / relative path / via shim
 8. branch -d: managed → jj bookmark delete / not managed → real git
+9. drop-in pass-through: `list --porcelain`, unhandled subcommands, `add --orphan` / `add -d` reach real git
+10. add: leading directories are created like real git
+11. prune reap: forgotten workspaces (shim-created and meta-less) are forgotten; live and protected workspaces survive; `--expire` and locked records mirror real git's decision; a dry-run leaves jj state untouched; colocated repos are reaped too
+12. jj as caller: internal git worktree calls of a colocated repo pass through (no recursion), also with verbose issue logging enabled; jj's own prune is pure pass-through
+13. remove: only jj-registered workspaces are translated; git-native worktrees (created via `-d` / `--orphan`) pass through to real git, with both `--force` and `-f`
 
 ## Repository
 
